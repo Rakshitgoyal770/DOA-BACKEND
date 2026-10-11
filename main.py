@@ -25,6 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.routes_chat import router as chat_router
 from api.routes_dao import router as dao_router
 from api.routes_proposal import router as proposal_router
+from api.routes_sync import router as sync_router
 from db.schema import init_db
 
 
@@ -65,6 +66,7 @@ app.add_middleware(
 app.include_router(chat_router)
 app.include_router(dao_router)
 app.include_router(proposal_router)
+app.include_router(sync_router)
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
@@ -93,6 +95,8 @@ def root():
             "GET  /proposals": "List proposals (filter by space_id, state)",
             "GET  /proposals/{id}": "Full proposal detail",
             "GET  /proposals/{id}/concentration": "Whale concentration analysis",
+            "GET  /sync/status": "Audit collected data dates and missing records",
+            "POST /sync/run": "Trigger automated incremental sync (proposals, votes, forum)",
         },
         "docs": "http://127.0.0.1:8000/docs",
     }

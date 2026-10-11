@@ -14,18 +14,40 @@ def strip_html(cooked: str) -> str:
     return text
 
 
+import urllib.parse
+
+def normalize_discourse_url(url: str) -> str:
+    """
+    Normalizes human-facing Discourse URLs to the JSON endpoint:
+    Strips query parameters (?u=...), trailing slashes, and post numbers (/20526/42 -> /20526)
+    """
+    parsed = urllib.parse.urlparse(url)
+    path = parsed.path.rstrip('/')
+    # If path has a sub-post number like /t/slug/12345/42, extract up to the topic id
+    m = re.match(r'(.*?/t/(?:[^/]+/)?\d+)', path)
+    if m:
+        clean_path = m.group(1)
+    else:
+        clean_path = path
+    return f"{parsed.scheme}://{parsed.netloc}{clean_path}.json"
+
+
 def fetch_thread(thread_url: str) -> dict:
     """
     thread_url: the human-facing URL, e.g.
-    https://forum.arbitrum.foundation/t/some-slug/31407
-    We append .json to it — Discourse's convention for structured data.
+    https://forum.arbitrum.foundation/t/some-slug/31407?u=entropy
+    Normalized and appended with .json for Discourse's structured API.
     """
-    json_url = thread_url + ".json"
+    # Skip non-discourse or raw gist files
+    if "gist.github" in thread_url or not ("/t/" in thread_url):
+        raise ValueError(f"Not a valid Discourse topic URL: {thread_url}")
+
+    json_url = normalize_discourse_url(thread_url)
     headers = {"User-Agent": USER_AGENT}
 
-    resp = requests.get(json_url, headers=headers)
+    resp = requests.get(json_url, headers=headers, timeout=10)
     resp.raise_for_status()
-    time.sleep(0.5)  # be polite, don't hammer the forum
+    time.sleep(0.3)  # be polite, don't hammer the forum
 
     return resp.json()
 
