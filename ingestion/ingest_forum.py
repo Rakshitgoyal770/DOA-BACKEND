@@ -50,10 +50,5 @@ def ingest_forum_for_all_linked_proposals(conn):
 
 if __name__ == "__main__":
     conn = get_connection()
-    # Test with just one real proposal first — same on-demand pattern as votes
-    ingest_forum_for_proposal(
-        "0x472fb3b40d3df9b1a65de03b85e4867a76f7b1ec014e2d69f347256b0d08184c",
-        "https://forum.arbitrum.foundation/t/banning-projects-identified-in-the-high-severity-watchdog-program-cases/31407",
-        conn
-    )
+    ingest_forum_for_all_linked_proposals(conn)
     conn.close()
