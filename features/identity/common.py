@@ -10,7 +10,9 @@ import re
 from datetime import datetime, timezone
 
 CONFIDENCE_RANK = {"unresolved": 0, "low": 1, "medium": 2, "high": 3, "certain": 4}
-WALLET_RE = re.compile(r"0x[a-fA-F0-9]{40}")
+# Exactly 40 hex characters after "0x". The look-arounds stop it from matching the
+# first 40 characters of a longer value, e.g. a 64-character transaction hash.
+WALLET_RE = re.compile(r"(?<![0-9a-zA-Z])0x[a-fA-F0-9]{40}(?![0-9a-zA-Z])")
 ENS_RE = re.compile(r"\b([a-z0-9][a-z0-9-]{1,62}(?:\.[a-z0-9-]+)*\.eth)\b", re.IGNORECASE)
 
 

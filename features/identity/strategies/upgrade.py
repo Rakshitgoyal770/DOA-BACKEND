@@ -14,12 +14,12 @@ def upgrade_self_disclosed(conn) -> dict:
     upgraded = 0
     for r in rows:
         if wallet_voted_in_user_spaces(conn, r["forum_username"], r["wallet_address"]):
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE resolved_identities SET confidence_level = 'high', resolved_at = ? "
                 "WHERE forum_username = ? AND confidence_level IN ('low', 'medium')",
                 (datetime.now(timezone.utc).isoformat(), r["forum_username"]),
             )
-            upgraded += 1
+            upgraded += cur.rowcount      # 0 when the link was already high
     conn.commit()
     return {"strategy": "upgrade_self_disclosed", "upgraded": upgraded}
 
@@ -32,10 +32,10 @@ def upgrade_medium_links(conn) -> dict:
     upgraded = 0
     for r in rows:
         if wallet_voted_in_user_spaces(conn, r["forum_username"], r["wallet_address"]):
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE resolved_identities SET confidence_level = 'high' WHERE forum_username = ?",
                 (r["forum_username"],),
             )
-            upgraded += 1
+            upgraded += cur.rowcount
     conn.commit()
     return {"strategy": "upgrade_medium_links", "upgraded": upgraded}

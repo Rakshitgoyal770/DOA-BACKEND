@@ -3,7 +3,7 @@
 Runs the identity-linking strategies, strongest evidence first, and exposes the command line.
 
     python -m features.identity.runner --all [--voters 400] [--limit 150]
-    python -m features.identity.runner --upgrade       # re-score links against loaded votes
+    python -m features.identity.runner --upgrade       # offline: re-check self-disclosed links, re-score
     python -m features.identity.runner --stats
 """
 
@@ -37,16 +37,16 @@ def resolve_all(conn, profile_limit: int = 100, voter_wallets: int = 300) -> dic
 
 
 def rescore(conn) -> dict:
-    """Cheap, offline: promote links using whatever votes are loaded."""
+    """Cheap, offline: re-check self-disclosed links, then promote links using loaded votes."""
     return {"usernames_normalized": normalize_usernames(conn),
-            "steps": [upgrade_self_disclosed(conn), upgrade_medium_links(conn)],
+            "steps": [link_self_disclosed(conn), upgrade_self_disclosed(conn), upgrade_medium_links(conn)],
             "stats": identity_stats(conn)}
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Link forum usernames to wallets")
     parser.add_argument("--all", action="store_true", help="Run every strategy (network calls)")
-    parser.add_argument("--upgrade", action="store_true", help="Only re-score links against loaded votes")
+    parser.add_argument("--upgrade", action="store_true", help="Offline only: re-check self-disclosed links and re-score against loaded votes")
     parser.add_argument("--stats", action="store_true", help="Print coverage stats")
     parser.add_argument("--limit", type=int, default=100, help="Profiles to fetch (default 100)")
     parser.add_argument("--voters", type=int, default=300, help="Top voter wallets to reverse-resolve (default 300)")
