@@ -1,12 +1,12 @@
 # features/chat/retrieval.py
 """Vector search: embed the query, query ChromaDB, drop chunks that are too far away."""
 
-from vector.embedding import collection, model
+from vector.embedding import get_collection, get_model
 
 
 def retrieve(query: str, n_results: int = 5, where: dict = None, max_distance: float = 0.7):
-    query_embedding = model.encode(query).tolist()
-    results = collection.query(
+    query_embedding = get_model().encode(query).tolist()
+    results = get_collection().query(
         query_embeddings=[query_embedding],
         n_results=n_results,
         where=where

@@ -85,6 +85,9 @@ CREATE TABLE IF NOT EXISTS proposal_polling_state (
 
 CREATE INDEX IF NOT EXISTS idx_proposals_space ON proposals(space_id);
 CREATE INDEX IF NOT EXISTS idx_votes_proposal ON votes(proposal_id);
+-- Wallet addresses arrive in mixed case, so lookups compare lower(voter);
+-- this index lets "votes of wallet X on proposal Y" skip a full scan.
+CREATE INDEX IF NOT EXISTS idx_votes_proposal_voter ON votes(proposal_id, lower(voter));
 CREATE INDEX IF NOT EXISTS idx_forum_proposal ON forum_posts(proposal_id);
 """
 
