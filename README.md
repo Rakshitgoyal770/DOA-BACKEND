@@ -210,6 +210,22 @@ uvicorn main:app --port 8000 --reload
 ```
 Navigate to `http://127.0.0.1:8000/docs` to test endpoints via Swagger.
 
+### Keeping the Data Fresh
+Run these in order after new governance activity (each step only processes what changed):
+```bash
+python -m features.sync.runner --sync-all     # proposals, forum posts, every missing vote
+python -m features.identity.runner --upgrade  # re-check wallet links (offline)
+python -m vector.embedding                    # embed only new/changed documents
+python -m features.sync.runner --check        # audit, including vote completeness
+```
+
+### Running the Tests
+```bash
+python -m pytest
+```
+Offline unit tests use a temporary database and fakes; `tests/test_regression_real_db.py`
+pins verified values from the real database and is skipped when it is absent.
+
 ### Running the Evaluation Harness
 ```bash
 python -m eval.eval_harness

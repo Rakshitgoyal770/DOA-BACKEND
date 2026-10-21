@@ -96,7 +96,7 @@ flowchart TD
     Pipeline -->|"2. fetch_missing_forum_posts"| Discourse
     Proposal -->|"discussion_url"| Discourse
     Discourse --> Forum
-    Pipeline -->|"3. fetch_missing_votes"| Snapshot
+    Pipeline -->|"3. fetch_all_votes"| Snapshot
     Proposal --> Vote
     Snapshot --> Vote
     Pipeline -->|"4. audit"| Audit
@@ -116,10 +116,14 @@ flowchart TD
     upserts proposal state, scores, and counts.
   - `fetch_missing_forum_posts()` selects proposals with a discussion URL but
     no stored posts, fetches the thread, and upserts `forum_posts`.
-  - `fetch_missing_votes()` selects proposals with no vote rows, fetches
-    Snapshot votes, and upserts `votes`.
-  - `audit_collection_status()` calculates collection ranges and missing-data
-    counts from SQLite.
+  - `fetch_all_votes()` ([`features/votes/fetch.py`](./features/votes/fetch.py))
+    downloads every vote for proposals whose votes are missing or partial,
+    resuming from the newest stored vote, and upserts `votes` (no cap).
+  - `vote_completeness()` ([`features/votes/completeness.py`](./features/votes/completeness.py))
+    is the single rule for "complete / partial / missing", shared by the
+    fetcher and the audit.
+  - `audit_collection_status()` calculates collection ranges, missing-data
+    counts and vote completeness from SQLite.
   - `sync_all()` runs the three ingestion stages and returns the final audit.
 
 - [`clients/snapshot.py`](./clients/snapshot.py) translates
@@ -204,8 +208,10 @@ flowchart LR
 - [`features/identity/runner.py`](./features/identity/runner.py) stores
   wallet-to-forum mappings discovered through self-disclosure, ENS names, or a
   manually verified registry.
-- [`vector/embedding.py`](./vector/embedding.py) loads proposal bodies and
-  forum posts, generates embeddings, and upserts documents into ChromaDB.
+- [`vector/embedding.py`](./vector/embedding.py) syncs ChromaDB with SQLite
+  incrementally: new or edited text is embedded, metadata-only changes are
+  updated without embedding, removed rows are deleted, everything else is
+  skipped (`python -m vector.embedding [--dry-run]`).
 - Proposal documents are split by
   [`vector/chunking.py`](./vector/chunking.py); forum posts are indexed as
   individual documents.
