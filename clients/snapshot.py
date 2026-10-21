@@ -1,13 +1,19 @@
 # clients/snapshot.py
+import logging
+import time
+
 import requests
 
 SNAPSHOT_URL = "https://hub.snapshot.org/graphql"
+REQUEST_TIMEOUT = 30   # seconds; without a timeout a stalled connection hangs forever
+
+logger = logging.getLogger(__name__)
 
 
 def run_query(query: str) -> dict:
     payload = {"query": query}
     
-    resp = requests.post(SNAPSHOT_URL, json=payload)
+    resp = requests.post(SNAPSHOT_URL, json=payload, timeout=REQUEST_TIMEOUT)
     
     body = resp.json()
     
@@ -118,8 +124,6 @@ def get_votes(proposal_id: str, first: int = 100, skip: int = 0) -> list:
 
 def _run_query_retry(query: str, attempts: int = 4, backoff: float = 1.5) -> dict:
     """run_query with exponential backoff for transient network/rate-limit errors."""
-    import time
-
     for attempt in range(attempts):
         try:
             return run_query(query)
@@ -139,9 +143,11 @@ def iter_all_votes(proposal_id: str, page_size: int = 1000, pause: float = 0.2, 
     avoids losing votes that share a timestamp across a page boundary; votes
     already yielded are skipped by voter address. `start_ts` resumes from a timestamp
     (re-fetching the boundary second is harmless because writes are upserts).
-    """
-    import time
 
+    Known limit: if more than `page_size` votes share one exact second, the
+    cursor cannot move past that second. We then stop with a warning; the
+    proposal stays 'partial' in the audit instead of looping forever.
+    """
     seen: set[str] = set()
     cursor = start_ts
     while True:
@@ -156,14 +162,18 @@ def iter_all_votes(proposal_id: str, page_size: int = 1000, pause: float = 0.2, 
         }
         """ % (page_size, proposal_id, cursor)
         page = _run_query_retry(query)["votes"]
-        fresh = [v for v in page if v["voter"] not in seen]
-        if not fresh:
-            return
-        for v in fresh:
-            seen.add(v["voter"])
-            yield v
+        for v in page:
+            if v["voter"] not in seen:              # boundary votes come back twice; yield once
+                seen.add(v["voter"])
+                yield v
+
         if len(page) < page_size:
+            return                                  # a short page is the last page
+        if page[-1]["created"] == cursor:
+            # The whole page sits in the cursor's second, so the cursor cannot move.
+            logger.warning(f"{proposal_id}: over {page_size} votes share timestamp {cursor}; "
+                           "stopping early, the audit will show this proposal as partial")
             return
-        cursor = page[-1]["created"]
+        cursor = page[-1]["created"]                # always moves forward, so the loop ends
         time.sleep(pause)
 

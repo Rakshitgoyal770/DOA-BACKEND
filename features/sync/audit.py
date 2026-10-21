@@ -2,7 +2,12 @@
 """Audit of what is stored in SQLite: date ranges, freshness, and what is missing."""
 
 import datetime
+from collections import Counter
 from typing import Any, Dict
+
+from features.votes.completeness import COMPLETE, MISSING, NO_VOTES, PARTIAL, vote_completeness
+
+MAX_LISTED_INCOMPLETE = 10   # how many incomplete proposals the audit names
 
 
 def audit_collection_status(conn) -> Dict[str, Any]:
@@ -98,12 +103,14 @@ def audit_collection_status(conn) -> Dict[str, Any]:
     # 5. Gaps & Missing Items
     total_proposals = conn.execute("SELECT COUNT(*) FROM proposals").fetchone()[0]
 
-    # Proposals without votes
-    missing_votes_count = conn.execute("""
-        SELECT COUNT(*) FROM proposals p
-        LEFT JOIN votes v ON p.id = v.proposal_id
-        WHERE v.proposal_id IS NULL
-    """).fetchone()[0]
+    # Vote completeness: stored votes vs. Snapshot's count, per proposal
+    completeness = vote_completeness(conn)
+    status_counts = Counter(r["status"] for r in completeness)
+    incomplete = sorted(
+        (r for r in completeness if r["status"] in (MISSING, PARTIAL)),
+        key=lambda r: r["expected"] - r["stored"],
+        reverse=True,
+    )
 
     # Proposals with forum URL but no forum posts
     missing_forum_posts_count = conn.execute("""
@@ -121,9 +128,20 @@ def audit_collection_status(conn) -> Dict[str, Any]:
         "votes": {
             "total_votes": vote_summary["total_votes"],
             "proposals_with_votes": vote_summary["props_with_votes"],
-            "proposals_missing_votes": missing_votes_count,
+            "proposals_missing_votes": status_counts[MISSING],
             "date_range": f"{min_vote_str} to {max_vote_str}",
-            "last_fetched": vote_summary["max_fetched"][:19] if vote_summary["max_fetched"] else "N/A"
+            "last_fetched": vote_summary["max_fetched"][:19] if vote_summary["max_fetched"] else "N/A",
+            "completeness": {
+                "complete": status_counts[COMPLETE],
+                "partial": status_counts[PARTIAL],
+                "missing": status_counts[MISSING],
+                "no_votes_on_snapshot": status_counts[NO_VOTES],
+                "is_complete": not incomplete,
+                "incomplete_proposals": [
+                    {k: r[k] for k in ("proposal_id", "space_id", "title", "stored", "expected", "status")}
+                    for r in incomplete[:MAX_LISTED_INCOMPLETE]
+                ],
+            },
         },
         "forum": {
             "total_posts": forum_summary["total_posts"],
@@ -152,7 +170,11 @@ def print_audit_report(audit_data: Dict[str, Any]):
     v = audit_data["votes"]
     print(f"  Total Votes Ingested: {v['total_votes']}")
     print(f"  Proposals with Votes: {v['proposals_with_votes']} / {audit_data['total_proposals']}")
-    print(f"  Proposals MISSING Votes: {v['proposals_missing_votes']} (need ingestion for concentration analysis)")
+    c = v["completeness"]
+    print(f"  Complete: {c['complete']} | Partial: {c['partial']} | Missing: {c['missing']} "
+          f"| No votes on Snapshot: {c['no_votes_on_snapshot']}")
+    for r in c["incomplete_proposals"]:
+        print(f"    - {r['status']:<8} {r['stored']:>6}/{r['expected']:<6} [{r['space_id']}] {r['title'][:40]}")
     print(f"  Vote Dates Covered: {v['date_range']}")
     print(f"  Last Vote Fetch: {v['last_fetched']}")
 

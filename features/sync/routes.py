@@ -22,6 +22,7 @@ def get_sync_status():
     - Date ranges of proposals, votes, and forum posts
     - Last fetched timestamps
     - Count of missing votes and missing forum discussions
+    - Vote completeness per proposal (stored vs. Snapshot's count)
     """
     conn = get_connection()
     status = audit_collection_status(conn)
@@ -38,7 +39,8 @@ def run_sync(
     Triggers an automated sync:
     1. Fetches latest proposals from Snapshot GraphQL and updates active proposal states
     2. Fetches missing forum discussions for proposals with discussion URLs
-    3. Fetches missing votes for proposals lacking voter records
+    3. Fetches every vote for up to `limit` proposals whose votes are missing or
+       partial (no per-proposal cap; large proposals can take a while)
     """
     conn = get_connection()
     result = sync_all(conn, proposals_first=limit, votes_proposals_limit=limit)
