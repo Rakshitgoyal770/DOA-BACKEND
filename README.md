@@ -24,29 +24,33 @@ Decentralized governance suffers from a fundamental information asymmetry:
 
 ## 2. Key Empirical Findings (Proven on Real Data)
 
-This system was tested against live data from **5 major DAOs** (Optimism, Arbitrum, Aave, Uniswap, ENS) covering **100 proposals** and **thousands of on-chain votes**:
+This system was tested against live data from **5 major DAOs** (Optimism, Arbitrum, Aave, Uniswap, ENS) covering **117 proposals** and **515,000+ on-chain votes** (every vote fetched, not a sample):
 
 ### 📊 The "Silence Gap" (Voters vs. Forum Deliberators)
-Across analyzed governance proposals, fewer than **1%** of voting wallets ever contributed to forum discussions:
+Across the dataset there are **356 distinct forum participants** against **86,444 distinct voting wallets** — fewer than **0.5%** (an upper bound, since one person can hold several wallets):
 
 | DAO Space | Proposals | Forum Coverage | Avg. Voter-to-Forum Ratio | Key Phenomenon |
 |:---|:---:|:---:|:---:|:---|
-| **Optimism Collective** (`opcollective.eth`) | 20 | **90.0%** | **0.058%** | 63,845 voters vs. 16 forum posters on election proposals |
-| **Arbitrum DAO** (`arbitrumfoundation.eth`) | 20 | **80.0%** | **0.972%** | High community discussion, small voting cohort |
-| **Aave DAO** (`aavedao.eth`) | 20 | **100.0%** | **6.817%** | Strict forum mandate before on-chain execution |
-| **Uniswap** (`uniswapgovernance.eth`) | 20 | **60.0%** | **2.518%** | Heavy reliance on off-chain delegate statements |
-| **ENS** (`ens.eth`) | 20 | **85.0%** | **8.278%** | Small, active technical community |
+| **Optimism Collective** (`opcollective.eth`) | 20 | **95.0%** | **0.061%** | 63,845 voters vs. 16 forum posters on election proposals |
+| **Arbitrum DAO** (`arbitrumfoundation.eth`) | 24 | **95.8%** | **0.981%** | High community discussion, small voting cohort |
+| **Aave DAO** (`aavedao.eth`) | 31 | **96.8%** | **15.56%** | Strict forum mandate before on-chain execution |
+| **Uniswap** (`uniswapgovernance.eth`) | 22 | **86.4%** | **3.429%** | Heavy reliance on off-chain delegate statements |
+| **ENS** (`ens.eth`) | 20 | **90.0%** | **8.589%** | Small, active technical community |
 
 ### 🐋 Whale Power Concentration
-On contentious proposals, governance power is heavily centralized:
-* **Badgeholder Nomination Voting:** Top-4 wallets control **93.9%** of voting power.
-* **Season 2 (Velodrome):** Top-4 wallets control **92.6%** of voting power.
-* **Cycle #9a (Grants Council):** Top-4 wallets control **87.0%** of voting power.
-* Across all non-election contested proposals, **the median top-4 wallet concentration was ~82%**.
+Measured on complete vote data (116 proposals with votes), the share of voting power held by the largest wallets is:
+* **Median top-4 wallets: 53.7%** of voting power; **median top-10 wallets: 86.8%**.
+* **Optimism mass elections** (12,000–64,000 voters each) sit at **45–55%** for the top 4 — e.g. Badgeholder Nomination 54.5%, Velodrome 46.8%, Cycle #9a Grants Council 47.7%.
+* **Small, delegate-driven Uniswap votes are the most concentrated**: top-4 wallets hold 99.7% (sentinel rotation, 383 voters) and 98.4% (governance statute RFC, 133 voters).
+
+> **Correction:** earlier versions of this README reported 87–94% top-4 concentration and a ~82% median. Those figures came from a capped sample (the first 500–1,000 votes of each proposal, because Snapshot limits one request to 1,000), which overstated concentration on large votes. The numbers above use every vote.
 
 ---
 
 ## 3. System Architecture
+
+For a file-by-file view of ingestion, storage, indexing, retrieval, and API
+data movement, see [`DATA_FLOW.md`](./DATA_FLOW.md).
 
 ```mermaid
 flowchart TD
@@ -58,7 +62,7 @@ flowchart TD
     subgraph Storage ["2. Dual-Layer Storage"]
         SQL[("SQLite Relational DB<br/>dao_intelligence.db<br/>(proposals, votes, forum_posts)")]
         RESOLV["Entity Resolution Engine<br/>(Regex + Levenshtein Matching<br/>Wallet &harr; Forum Username)"]
-        CHROMA[("ChromaDB Vector Store<br/>(BAAI/bge-small-en-v1.5<br/>1,629 Embedded Chunks)")]
+        CHROMA[("ChromaDB Vector Store<br/>(BAAI/bge-small-en-v1.5<br/>1,995 Embedded Chunks)")]
     end
 
     subgraph Engine ["3. Intelligent Agent & Retrieval"]
@@ -208,7 +212,7 @@ Navigate to `http://127.0.0.1:8000/docs` to test endpoints via Swagger.
 
 ### Running the Evaluation Harness
 ```bash
-python eval/eval_harness.py
+python -m eval.eval_harness
 ```
 
 ---
@@ -218,7 +222,7 @@ python eval/eval_harness.py
 You can copy and adapt these bullet points directly for software engineering and backend roles:
 
 * **Backend / Distributed Systems:**
-  > *“Engineered a production-ready governance intelligence backend using FastAPI, SQLite, and ChromaDB, ingesting 100+ proposals and 1,000+ votes across 5 DAOs from Snapshot GraphQL and Discourse APIs.”*
+  > *“Engineered a production-ready governance intelligence backend using FastAPI, SQLite, and ChromaDB, ingesting 117 proposals and 515,000+ votes across 5 DAOs from Snapshot GraphQL and Discourse APIs.”*
 
 * **Machine Learning / RAG:**
   > *“Architected an evaluated RAG pipeline with dense vector indexing (BAAI/bge-small-en-v1.5) and a 4-tier resilient LLM fallback router (Groq &rarr; Gemini &rarr; OpenRouter &rarr; Mistral) with automatic 429 backoff handling.”*
@@ -227,4 +231,4 @@ You can copy and adapt these bullet points directly for software engineering and
   > *“Benchmarked retrieval quality using an automated LLM-as-a-judge evaluation harness over a golden dataset, achieving 87% Context Recall, 90% Faithfulness, and 100% Answer Relevancy.”*
 
 * **Data Engineering & Analytics:**
-  > *“Conducted whale concentration and voter silence analysis on Snapshot governance, empirically discovering that the top-4 wallets control ~82% of voting power while <1% of voting wallets participate in forum deliberation.”*
+  > *“Conducted whale concentration and voter silence analysis on Snapshot governance, measuring that the median top-4 wallets control ~54% of voting power (top-10: ~87%) while <0.5% of voting wallets participate in forum deliberation.”*
