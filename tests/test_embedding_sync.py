@@ -45,6 +45,10 @@ def small_db(db):
     return db
 
 
+def post_doc(post_id, proposal_id="P1"):
+    return f"forum_post_{proposal_id}_{post_id}"
+
+
 def stored(collection, doc_id):
     got = collection.get(ids=[doc_id], include=["documents", "metadatas"])
     return (got["documents"][0], got["metadatas"][0]) if got["ids"] else None
@@ -75,7 +79,7 @@ def test_only_changed_text_is_re_embedded(small_db, collection):
 
     assert model.encoded == ["Edited: I now support it."]
     assert result["embed"] == 1
-    assert stored(collection, "forum_post_11")[0] == "Edited: I now support it."
+    assert stored(collection, post_doc(11))[0] == "Edited: I now support it."
 
 
 def test_new_identity_link_is_a_metadata_update_with_case_insensitive_vote_match(small_db, collection):
@@ -87,7 +91,7 @@ def test_new_identity_link_is_a_metadata_update_with_case_insensitive_vote_match
     result = sync_index(small_db, collection=collection, model=ModelMustNotBeUsed())
 
     assert (result["embed"], result["update_metadata"]) == (0, 1)
-    metadata = stored(collection, "forum_post_10")[1]
+    metadata = stored(collection, post_doc(10))[1]
     assert metadata["resolved_wallet"] == WALLET.lower()
     assert metadata["voting_power"] == 1234.5
 
@@ -98,14 +102,14 @@ def test_removed_identity_link_removes_the_wallet_fields(small_db, collection, a
     (Found on real data: 282 posts kept a wallet link that no longer existed.)"""
     add_identity(small_db, "alice", WALLET, "low")
     sync_index(small_db, collection=collection, model=FakeModel())
-    assert "resolved_wallet" in stored(collection, "forum_post_10")[1]
+    assert "resolved_wallet" in stored(collection, post_doc(10))[1]
 
     small_db.execute("DELETE FROM resolved_identities WHERE forum_username = 'alice'")
     if also_edit_text:
         small_db.execute("UPDATE forum_posts SET content = 'Edited.' WHERE id = 10")
     sync_index(small_db, collection=collection, model=FakeModel())
 
-    metadata = stored(collection, "forum_post_10")[1]
+    metadata = stored(collection, post_doc(10))[1]
     assert "resolved_wallet" not in metadata and "confidence_level" not in metadata
     again = sync_index(small_db, collection=collection, model=ModelMustNotBeUsed())
     assert (again["embed"], again["update_metadata"]) == (0, 0)
@@ -119,7 +123,7 @@ def test_removed_post_is_deleted_but_foreign_ids_are_kept(small_db, collection):
     result = sync_index(small_db, collection=collection, model=ModelMustNotBeUsed())
 
     assert result["delete"] == 1
-    assert stored(collection, "forum_post_11") is None
+    assert stored(collection, post_doc(11)) is None
     assert stored(collection, "manual_test_doc") is not None
 
 

@@ -5,14 +5,15 @@ import json
 
 
 def add_proposal(conn, pid, space_id="test.eth", votes_count=0, title=None, body="",
-                 choices=("For", "Against"), scores=None, start_ts=1_700_000_000):
+                 choices=("For", "Against"), scores=None, start_ts=1_700_000_000,
+                 end_ts=1_700_100_000, state="closed", discussion_url=None):
     conn.execute(
         """INSERT INTO proposals (id, space_id, title, body, choices_json, scores_json,
-                                  scores_total, votes_count, start_ts, state)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'closed')""",
+                                  scores_total, votes_count, start_ts, end_ts, state, discussion_url)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (pid, space_id, title or f"Proposal {pid}", body, json.dumps(list(choices)),
          json.dumps(scores) if scores else None, sum(scores) if scores else None,
-         votes_count, start_ts),
+         votes_count, start_ts, end_ts, state, discussion_url),
     )
     conn.commit()
 

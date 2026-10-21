@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 import db.schema as schema
 from features.chat import routes as chat_routes
 from features.chat.context import proposal_facts
+from features.forum.completeness import forum_completeness
 from features.sync.audit import audit_collection_status
 from features.votes.completeness import vote_completeness
 
@@ -51,6 +52,17 @@ def test_known_proposal_facts_are_unchanged(conn):
 def test_known_proposal_votes_are_complete(conn):
     row = next(r for r in vote_completeness(conn) if r["proposal_id"] == DEFILLAMA)
     assert (row["stored"], row["expected"], row["status"]) == (14194, 14194, "complete")
+
+
+def test_known_proposal_forum_thread_is_fully_stored(conn):
+    """Was cut at Discourse's first page of 20 posts; the thread has 33."""
+    t = next(t for t in forum_completeness(conn) if DEFILLAMA in t["proposal_ids"])
+    assert (t["stored"], t["listed"], t["status"]) == (33, 33, "complete")
+
+
+def test_forum_completeness_adds_up(conn):
+    c = audit_collection_status(conn)["forum"]["completeness"]
+    assert c["complete"] + c["partial"] + c["not_fetched"] + c["error"] == c["threads"]
 
 
 def test_audit_completeness_adds_up(conn):

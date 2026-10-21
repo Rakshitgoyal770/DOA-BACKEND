@@ -5,6 +5,8 @@ import datetime
 from collections import Counter
 from typing import Any, Dict
 
+from features.forum import completeness as forum_status
+from features.forum.completeness import forum_completeness
 from features.votes.completeness import COMPLETE, MISSING, NO_VOTES, PARTIAL, vote_completeness
 
 MAX_LISTED_INCOMPLETE = 10   # how many incomplete proposals the audit names
@@ -112,6 +114,15 @@ def audit_collection_status(conn) -> Dict[str, Any]:
         reverse=True,
     )
 
+    # Forum completeness: stored posts vs. what Discourse listed, per thread
+    threads = forum_completeness(conn)
+    thread_counts = Counter(t["status"] for t in threads)
+    incomplete_threads = sorted(
+        (t for t in threads if t["status"] != forum_status.COMPLETE),
+        key=lambda t: t["listed"] - t["stored"],
+        reverse=True,
+    )
+
     # Proposals with forum URL but no forum posts
     missing_forum_posts_count = conn.execute("""
         SELECT COUNT(*) FROM proposals p
@@ -148,7 +159,20 @@ def audit_collection_status(conn) -> Dict[str, Any]:
             "proposals_with_posts": forum_summary["props_with_posts"],
             "proposals_missing_posts": missing_forum_posts_count,
             "date_range": f"{forum_summary['min_created'][:10] if forum_summary['min_created'] else 'N/A'} to {forum_summary['max_created'][:10] if forum_summary['max_created'] else 'N/A'}",
-            "last_fetched": forum_summary["max_fetched"][:19] if forum_summary["max_fetched"] else "N/A"
+            "last_fetched": forum_summary["max_fetched"][:19] if forum_summary["max_fetched"] else "N/A",
+            "completeness": {
+                "threads": len(threads),
+                "complete": thread_counts[forum_status.COMPLETE],
+                "partial": thread_counts[forum_status.PARTIAL],
+                "not_fetched": thread_counts[forum_status.NOT_FETCHED],
+                "error": thread_counts[forum_status.ERROR],
+                "shared_threads": sum(1 for t in threads if len(t["proposal_ids"]) > 1),
+                "is_complete": not incomplete_threads,
+                "incomplete_threads": [
+                    {k: t[k] for k in ("url", "status", "stored", "listed", "unavailable", "last_error")}
+                    for t in incomplete_threads[:MAX_LISTED_INCOMPLETE]
+                ],
+            },
         }
     }
 
@@ -183,6 +207,11 @@ def print_audit_report(audit_data: Dict[str, Any]):
     print(f"  Total Forum Posts: {f['total_posts']}")
     print(f"  Proposals with Posts: {f['proposals_with_posts']} / {audit_data['total_proposals']}")
     print(f"  Proposals with Discussion URL but NO Posts: {f['proposals_missing_posts']}")
+    fc = f["completeness"]
+    print(f"  Threads: {fc['threads']} | Complete: {fc['complete']} | Partial: {fc['partial']} "
+          f"| Not fetched: {fc['not_fetched']} | Error: {fc['error']} | Shared by >1 proposal: {fc['shared_threads']}")
+    for t in fc["incomplete_threads"]:
+        print(f"    - {t['status']:<11} {t['stored']:>4}/{t['listed']:<4} {t['url'][-55:]}")
     print(f"  Forum Posts Date Range: {f['date_range']}")
     print(f"  Last Forum Fetch: {f['last_fetched']}")
     print("=" * 70)

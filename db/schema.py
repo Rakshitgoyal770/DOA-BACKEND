@@ -9,6 +9,26 @@ from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "dao_intelligence.db"
 
+# A forum post is stored once per proposal that links its thread:
+#  * Discourse post ids are only unique inside ONE forum (Optimism's post 13884
+#    and Aave's post 13884 are different posts), and a proposal links exactly
+#    one thread, so (proposal_id, id) is always unique.
+#  * Several proposals can link the same thread; each gets its own copy, so
+#    every "posts of proposal X" query stays a simple WHERE proposal_id = ?.
+FORUM_POSTS_TABLE = """
+CREATE TABLE IF NOT EXISTS forum_posts (
+    id              INTEGER NOT NULL,      -- Discourse post id (unique within one forum only)
+    proposal_id     TEXT NOT NULL REFERENCES proposals(id),
+    topic_id        INTEGER,
+    post_number     INTEGER,
+    username        TEXT,
+    content         TEXT,                  -- HTML-stripped 'cooked' field
+    created_at      TEXT,
+    fetched_at      TEXT,
+    PRIMARY KEY (proposal_id, id)
+);
+"""
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS spaces (
     id              TEXT PRIMARY KEY,      -- e.g. 'arbitrumfoundation.eth'
@@ -49,15 +69,16 @@ CREATE TABLE IF NOT EXISTS votes (
     fetched_at      TEXT
 );
 
-CREATE TABLE IF NOT EXISTS forum_posts (
-    id              INTEGER PRIMARY KEY,   -- Discourse post id
-    proposal_id     TEXT REFERENCES proposals(id),
+""" + FORUM_POSTS_TABLE + """
+-- One row per Discourse thread we fetch: what Discourse listed, so we can tell
+-- whether every post was stored (like votes_count does for votes).
+CREATE TABLE IF NOT EXISTS forum_threads (
+    url             TEXT PRIMARY KEY,      -- thread JSON url, as normalize_discourse_url returns it
     topic_id        INTEGER,
-    post_number     INTEGER,
-    username        TEXT,
-    content         TEXT,                  -- HTML-stripped 'cooked' field
-    created_at      TEXT,
-    fetched_at      TEXT
+    listed_posts    INTEGER,               -- post ids Discourse listed (post_stream.stream)
+    unavailable     INTEGER DEFAULT 0,     -- listed ids Discourse did not return (deleted or hidden)
+    last_fetched_at TEXT,                  -- last successful fetch
+    last_error      TEXT                   -- NULL when the last attempt worked
 );
 
 CREATE TABLE IF NOT EXISTS resolved_identities (
@@ -92,18 +113,45 @@ CREATE INDEX IF NOT EXISTS idx_forum_proposal ON forum_posts(proposal_id);
 """
 
 
+def _migrate_forum_posts_key(conn):
+    """
+    Older databases keyed forum_posts by post id alone (see FORUM_POSTS_TABLE
+    for why that is wrong). SQLite cannot change a primary key in place, so
+    the table is rebuilt once and every row is copied unchanged. Later calls
+    see the new key and do nothing.
+    """
+    key = [r[1] for r in sorted(conn.execute("PRAGMA table_info(forum_posts)"), key=lambda r: r[5]) if r[5]]
+    if key != ["id"]:
+        return
+    conn.executescript("""
+        BEGIN;
+        ALTER TABLE forum_posts RENAME TO forum_posts_old;
+    """ + FORUM_POSTS_TABLE + """
+        INSERT INTO forum_posts (id, proposal_id, topic_id, post_number, username, content, created_at, fetched_at)
+            SELECT id, proposal_id, topic_id, post_number, username, content, created_at, fetched_at
+            FROM forum_posts_old;
+        DROP TABLE forum_posts_old;
+        CREATE INDEX IF NOT EXISTS idx_forum_proposal ON forum_posts(proposal_id);
+        COMMIT;
+    """)
+
+
+def _ensure_schema(conn):
+    conn.executescript(SCHEMA)
+    _migrate_forum_posts_key(conn)
+    conn.commit()
+
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
-    conn.executescript(SCHEMA)
-    conn.commit()
+    _ensure_schema(conn)
     conn.close()
     print(f"Database initialized at {DB_PATH}")
 
 
 def get_connection():
     conn = sqlite3.connect(DB_PATH)
-    conn.executescript(SCHEMA)
-    conn.commit()
+    _ensure_schema(conn)
     conn.row_factory = sqlite3.Row   # lets you access columns by name, e.g. row["title"]
     return conn
 

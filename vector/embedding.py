@@ -4,7 +4,8 @@ Keeps the ChromaDB search index in step with SQLite, touching only what changed.
 
 What goes into the index (each item is a "document"):
   * proposal body chunks   id: proposal_<proposal_id>_<n>
-  * forum posts            id: forum_post_<post_id>
+  * forum posts            id: forum_post_<proposal_id>_<post_id>
+                           (a post is stored once per proposal linking its thread)
 
 For every document, a sync compares SQLite (what it should be) with Chroma
 (what it is) and picks the cheapest correct action:
@@ -96,7 +97,7 @@ def forum_documents(conn) -> dict[str, tuple[str, dict]]:
             metadata["confidence_level"] = r["confidence_level"]
         if r["vp"] is not None:
             metadata["voting_power"] = r["vp"]
-        docs[f"forum_post_{r['id']}"] = (r["content"], metadata)
+        docs[f"forum_post_{r['proposal_id']}_{r['id']}"] = (r["content"], metadata)
     return docs
 
 
