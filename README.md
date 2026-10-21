@@ -24,18 +24,20 @@ Decentralized governance suffers from a fundamental information asymmetry:
 
 ## 2. Key Empirical Findings (Proven on Real Data)
 
-This system was tested against live data from **5 major DAOs** (Optimism, Arbitrum, Aave, Uniswap, ENS) covering **117 proposals** and **515,000+ on-chain votes** (every vote fetched, not a sample):
+This system was tested against live data from **5 major DAOs** (Optimism, Arbitrum, Aave, Uniswap, ENS) covering **117 proposals**, **515,000+ on-chain votes** and **2,300+ forum posts** (every vote and every post of each linked thread fetched, not a sample):
 
 ### 📊 The "Silence Gap" (Voters vs. Forum Deliberators)
-Across the dataset there are **356 distinct forum participants** against **86,444 distinct voting wallets** — fewer than **0.5%** (an upper bound, since one person can hold several wallets):
+Across the dataset there are **472 distinct forum participants** against **86,445 distinct voting wallets** — about **0.55%**, fewer than **1%** (an upper bound, since one person can hold several wallets):
 
 | DAO Space | Proposals | Forum Coverage | Avg. Voter-to-Forum Ratio | Key Phenomenon |
 |:---|:---:|:---:|:---:|:---|
-| **Optimism Collective** (`opcollective.eth`) | 20 | **95.0%** | **0.061%** | 63,845 voters vs. 16 forum posters on election proposals |
-| **Arbitrum DAO** (`arbitrumfoundation.eth`) | 24 | **95.8%** | **0.981%** | High community discussion, small voting cohort |
-| **Aave DAO** (`aavedao.eth`) | 31 | **96.8%** | **15.56%** | Strict forum mandate before on-chain execution |
-| **Uniswap** (`uniswapgovernance.eth`) | 22 | **86.4%** | **3.429%** | Heavy reliance on off-chain delegate statements |
-| **ENS** (`ens.eth`) | 20 | **90.0%** | **8.589%** | Small, active technical community |
+| **Optimism Collective** (`opcollective.eth`) | 20 | **95.0%** | **0.111%** | 63,845 voters vs. 17 forum posters on election proposals |
+| **Arbitrum DAO** (`arbitrumfoundation.eth`) | 24 | **100.0%** | **1.272%** | High community discussion, small voting cohort |
+| **Aave DAO** (`aavedao.eth`) | 31 | **100.0%** | **6.853%** | Strict forum mandate before on-chain execution |
+| **Uniswap** (`uniswapgovernance.eth`) | 22 | **90.9%** | **4.501%** | Heavy reliance on off-chain delegate statements |
+| **ENS** (`ens.eth`) | 20 | **90.0%** | **11.626%** | Small, active technical community |
+
+*Forum coverage = share of proposals with at least one forum post. The ratio is the average over proposals of forum posters ÷ voters, so a proposal with very few voters moves it a lot (e.g. Aave fell from 15.6% when one proposal grew from 1 voter). Earlier versions counted only the first 20 posts of each thread; these figures use every post.*
 
 ### 🐋 Whale Power Concentration
 Measured on complete vote data (116 proposals with votes), the share of voting power held by the largest wallets is:
@@ -62,7 +64,7 @@ flowchart TD
     subgraph Storage ["2. Dual-Layer Storage"]
         SQL[("SQLite Relational DB<br/>dao_intelligence.db<br/>(proposals, votes, forum_posts)")]
         RESOLV["Entity Resolution Engine<br/>(Regex + Levenshtein Matching<br/>Wallet &harr; Forum Username)"]
-        CHROMA[("ChromaDB Vector Store<br/>(BAAI/bge-small-en-v1.5<br/>1,995 Embedded Chunks)")]
+        CHROMA[("ChromaDB Vector Store<br/>(BAAI/bge-small-en-v1.5<br/>2,988 Embedded Chunks)")]
     end
 
     subgraph Engine ["3. Intelligent Agent & Retrieval"]
@@ -163,7 +165,7 @@ curl -X POST "http://127.0.0.1:8000/chat" \
 ## 6. Engineering Decisions & Architecture Trade-offs
 
 1. **Why SQLite for Relational Ingestion instead of Postgres?**
-   * *Rationale:* The ingestion pipeline is write-infrequent (batch Snapshot & Discourse sync) and read-heavy. SQLite in WAL (Write-Ahead Logging) mode provides sub-millisecond local reads with zero infrastructure overhead. Per-request connections with clean context teardown prevent connection leaks while keeping the data layer trivial to migrate to PostgreSQL.
+   * *Rationale:* The ingestion pipeline is write-infrequent (batch Snapshot & Discourse sync) and read-heavy. SQLite provides sub-millisecond local reads with zero infrastructure overhead. It currently runs in its default rollback-journal mode; enabling WAL (Write-Ahead Logging) would let API reads continue while a sync is writing. Per-request connections with clean context teardown prevent connection leaks while keeping the data layer trivial to migrate to PostgreSQL.
 2. **Why Local ChromaDB PersistentClient?**
    * *Rationale:* Avoids distributed network hops for vector search. Using `BAAI/bge-small-en-v1.5` embeddings (384 dimensions) provides high semantic density and fast Euclidean/cosine distance calculations while fitting comfortably in memory.
 3. **Why a Multi-Tier Resilient LLM Router?**
@@ -247,4 +249,4 @@ You can copy and adapt these bullet points directly for software engineering and
   > *“Benchmarked retrieval quality using an automated LLM-as-a-judge evaluation harness over a golden dataset, achieving 87% Context Recall, 90% Faithfulness, and 100% Answer Relevancy.”*
 
 * **Data Engineering & Analytics:**
-  > *“Conducted whale concentration and voter silence analysis on Snapshot governance, measuring that the median top-4 wallets control ~54% of voting power (top-10: ~87%) while <0.5% of voting wallets participate in forum deliberation.”*
+  > *“Conducted whale concentration and voter silence analysis on Snapshot governance, measuring that the median top-4 wallets control ~54% of voting power (top-10: ~87%) while <1% of voting wallets participate in forum deliberation.”*

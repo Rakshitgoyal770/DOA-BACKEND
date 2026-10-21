@@ -93,7 +93,7 @@ flowchart TD
     Pipeline -->|"1. fetch_new_proposals"| Snapshot
     Snapshot --> Space
     Snapshot --> Proposal
-    Pipeline -->|"2. fetch_missing_forum_posts"| Discourse
+    Pipeline -->|"2. fetch_forum_threads"| Discourse
     Proposal -->|"discussion_url"| Discourse
     Discourse --> Forum
     Pipeline -->|"3. fetch_all_votes"| Snapshot
@@ -114,8 +114,12 @@ flowchart TD
   [`features/sync/runner.py`](./features/sync/runner.py)
   - `fetch_new_proposals()` gets current proposals for every curated DAO and
     upserts proposal state, scores, and counts.
-  - `fetch_missing_forum_posts()` selects proposals with a discussion URL but
-    no stored posts, fetches the thread, and upserts `forum_posts`.
+  - `fetch_forum_threads()` ([`features/forum/fetch.py`](./features/forum/fetch.py))
+    fetches every post of each linked thread (Discourse's first page holds only
+    20; the rest are requested by id), stores posts once per proposal linking
+    the thread, and re-checks recent threads for new posts.
+  - `forum_completeness()` ([`features/forum/completeness.py`](./features/forum/completeness.py))
+    compares stored posts with what Discourse listed (`forum_threads`).
   - `fetch_all_votes()` ([`features/votes/fetch.py`](./features/votes/fetch.py))
     downloads every vote for proposals whose votes are missing or partial,
     resuming from the newest stored vote, and upserts `votes` (no cap).
@@ -164,8 +168,8 @@ erDiagram
         text choice_json
     }
     forum_posts {
-        integer id PK
-        text proposal_id FK
+        integer id PK "with proposal_id"
+        text proposal_id PK,FK
         text username
         text content
     }
