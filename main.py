@@ -22,10 +22,11 @@ Key findings surfaced by this system (measured on real data):
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes_chat import router as chat_router
-from api.routes_dao import router as dao_router
-from api.routes_proposal import router as proposal_router
-from api.routes_sync import router as sync_router
+from features.chat.routes import router as chat_router
+from features.daos.routes import router as dao_router
+from features.identity.routes import router as identity_router
+from features.proposals.routes import router as proposal_router
+from features.sync.routes import router as sync_router
 from db.schema import init_db
 
 
@@ -67,6 +68,7 @@ app.include_router(chat_router)
 app.include_router(dao_router)
 app.include_router(proposal_router)
 app.include_router(sync_router)
+app.include_router(identity_router)
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
@@ -97,6 +99,9 @@ def root():
             "GET  /proposals/{id}/concentration": "Whale concentration analysis",
             "GET  /sync/status": "Audit collected data dates and missing records",
             "POST /sync/run": "Trigger automated incremental sync (proposals, votes, forum)",
+            "GET  /identities/stats": "Forum-user to wallet link coverage",
+            "GET  /identities/{username}": "Linked wallet and voting power for a forum user",
+            "POST /identities/resolve": "Run identity-linking strategies",
         },
         "docs": "http://127.0.0.1:8000/docs",
     }

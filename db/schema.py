@@ -68,6 +68,13 @@ CREATE TABLE IF NOT EXISTS resolved_identities (
     resolved_at           TEXT
 );
 
+CREATE TABLE IF NOT EXISTS wallet_ens (
+    wallet_address   TEXT PRIMARY KEY,
+    ens_name         TEXT,                 -- NULL when the wallet has no primary name
+    verified         INTEGER DEFAULT 0,    -- 1 if name resolves forward to the same wallet
+    checked_at       TEXT
+);
+
 CREATE TABLE IF NOT EXISTS proposal_polling_state (
     proposal_id               TEXT PRIMARY KEY REFERENCES proposals(id),
     is_active                 INTEGER DEFAULT 0,   -- 0 or 1, SQLite has no real boolean type

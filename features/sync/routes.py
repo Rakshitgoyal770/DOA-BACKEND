@@ -1,4 +1,4 @@
-# api/routes_sync.py
+# features/sync/routes.py
 """
 DAO Governance Intelligence — Sync & Data Audit Endpoints
 =========================================================
@@ -9,13 +9,8 @@ automated updates from Snapshot and Discourse.
 
 from fastapi import APIRouter, BackgroundTasks, Query
 from db.schema import get_connection
-from ingestion.sync_pipeline import (
-    audit_collection_status,
-    fetch_new_proposals,
-    fetch_missing_votes,
-    fetch_missing_forum_posts,
-    sync_all,
-)
+from features.sync.audit import audit_collection_status
+from features.sync.runner import sync_all
 
 router = APIRouter(prefix="/sync", tags=["Data Sync & Audit"])
 

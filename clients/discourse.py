@@ -1,4 +1,4 @@
-# ingestion/discourse_client.py
+# clients/discourse.py
 import re
 import time
 import requests
@@ -68,6 +68,24 @@ def extract_posts(thread_json: dict) -> list[dict]:
             "created_at": p["created_at"],
         })
     return result
+
+
+def fetch_discourse_profile(base_url: str, username: str) -> dict | None:
+    """Returns {name, bio, website, location} from /u/{username}.json, or None."""
+    try:
+        resp = requests.get(f"{base_url}/u/{username}.json", timeout=10,
+                            headers={"User-Agent": USER_AGENT})
+        if resp.status_code != 200:
+            return None
+        user = resp.json().get("user", {})
+    except (requests.RequestException, ValueError):
+        return None
+    return {
+        "name": user.get("name") or "",
+        "bio": user.get("bio_raw") or "",
+        "website": user.get("website") or "",
+        "location": user.get("location") or "",
+    }
 
 
 if __name__ == "__main__":

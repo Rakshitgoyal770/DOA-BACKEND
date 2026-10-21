@@ -1,4 +1,4 @@
-# api/routes_chat.py
+# features/chat/routes.py
 """
 POST /chat   — RAG-powered Q&A over DAO governance data.
 
@@ -18,7 +18,10 @@ Response:
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from agent.generate_answer import retrieve, answer_question
+from features.chat.context import collect_facts, enrich_chunks
+from features.chat.retrieval import retrieve
+from features.chat.service import answer_question
+from db.schema import get_connection
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
 
@@ -44,6 +47,10 @@ class SourceChunk(BaseModel):
     author: str | None        # present for forum_post sources
     voting_power: float | None  # present when identity resolved
     distance: float
+    wallet: str | None = None           # linked wallet for forum_post sources
+    ens_name: str | None = None
+    link_confidence: str | None = None  # certain | high | medium | low
+    voted: str | None = None            # how the author's wallet voted on this proposal
 
 
 class ChatResponse(BaseModel):
@@ -52,6 +59,7 @@ class ChatResponse(BaseModel):
     provider: str
     chunks_found: int
     sources: list[SourceChunk]
+    proposal_facts: list[dict] = []     # SQL facts for the proposals behind the sources
 
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
@@ -80,7 +88,14 @@ def chat(req: ChatRequest):
             )
         )
 
-    answer, provider = answer_question(req.query, chunks)
+    conn = get_connection()
+    try:
+        enrich_chunks(conn, chunks)
+        facts = collect_facts(conn, chunks)
+    finally:
+        conn.close()
+
+    answer, provider = answer_question(req.query, chunks, facts)
 
     sources = [
         SourceChunk(
@@ -89,8 +104,12 @@ def chat(req: ChatRequest):
             source_type=c["metadata"].get("source_type", "unknown"),
             proposal_id=c["metadata"].get("proposal_id"),
             author=c["metadata"].get("author"),
-            voting_power=c["metadata"].get("voting_power"),
+            voting_power=c["sql"].get("voting_power", c["metadata"].get("voting_power")),
             distance=round(c["distance"], 4),
+            wallet=c["sql"].get("wallet"),
+            ens_name=c["sql"].get("ens_name"),
+            link_confidence=c["sql"].get("link_confidence"),
+            voted=c["sql"].get("voted"),
         )
         for c in chunks
     ]
@@ -101,4 +120,5 @@ def chat(req: ChatRequest):
         provider=provider,
         chunks_found=len(chunks),
         sources=sources,
+        proposal_facts=facts,
     )

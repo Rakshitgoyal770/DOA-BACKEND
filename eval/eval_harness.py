@@ -6,8 +6,9 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-from agent.generate_answer import retrieve, build_prompt
-from agent.llm_provider import generate
+from features.chat.llm import generate
+from features.chat.prompt import build_prompt
+from features.chat.retrieval import retrieve
 from eval.golden_dataset import GOLDEN_DATASET
 
 # Deliberately use a DIFFERENT model to judge than to generate,
