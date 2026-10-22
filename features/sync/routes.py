@@ -37,13 +37,13 @@ def run_sync(
 ):
     """
     Triggers an automated sync:
-    1. Fetches latest proposals from Snapshot GraphQL and updates active proposal states
+    1. Re-reads unfinished proposals by id and adds every newly published proposal
     2. Fetches every post of forum threads that are new, incomplete or recently active
     3. Fetches every vote for up to `limit` proposals whose votes are missing or
        partial (no per-proposal cap; large proposals can take a while)
     """
     conn = get_connection()
-    result = sync_all(conn, proposals_first=limit, votes_proposals_limit=limit)
+    result = sync_all(conn, votes_proposals_limit=limit)
     conn.close()
     return {
         "message": "Data sync completed successfully",

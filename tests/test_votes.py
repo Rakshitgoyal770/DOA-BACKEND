@@ -112,7 +112,7 @@ def test_fetch_all_votes_does_smallest_proposals_first(db, monkeypatch):
 
 def test_sync_all_fetches_every_vote_not_just_500(db, monkeypatch):
     add_proposal(db, "P", votes_count=1500)
-    monkeypatch.setattr(runner, "fetch_new_proposals", lambda conn, first_per_dao: {"inserted": 0})
+    monkeypatch.setattr(runner, "sync_proposals", lambda conn, initial_per_dao: {})
     monkeypatch.setattr(runner, "fetch_forum_threads", lambda conn, limit: {})
     monkeypatch.setattr(vote_fetch, "iter_all_votes", FakeSnapshot({"P": 1500}))
 

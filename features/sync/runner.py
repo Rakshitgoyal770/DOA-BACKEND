@@ -17,7 +17,7 @@ from typing import Any, Dict
 
 from db.schema import get_connection
 from features.forum.fetch import fetch_forum_threads
-from features.proposals.fetch import fetch_new_proposals
+from features.proposals.fetch import sync_proposals
 from features.sync.audit import audit_collection_status, print_audit_report
 from features.votes.fetch import fetch_all_votes
 
@@ -25,10 +25,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 
-def sync_all(conn, proposals_first: int = 10, votes_proposals_limit: int = 10) -> Dict[str, Any]:
+def sync_all(conn, votes_proposals_limit: int = 10, initial_proposals_per_dao: int = 20) -> Dict[str, Any]:
     """
     Executes a complete sync:
-    1. Fetches new proposals & updates active ones
+    1. Re-reads every unfinished proposal by id, then adds every proposal
+       published since the newest one stored (no 'latest N' window)
     2. Fetches forum threads that are new, incomplete, failed, or recently active
        (every post, not just Discourse's first page of 20)
     3. Fetches ALL votes for up to `votes_proposals_limit` proposals whose
@@ -37,7 +38,7 @@ def sync_all(conn, proposals_first: int = 10, votes_proposals_limit: int = 10) -
     4. Audits updated status, including vote completeness
     """
     logger.info("=== STARTING FULL DATA SYNC ===")
-    prop_res = fetch_new_proposals(conn, first_per_dao=proposals_first)
+    prop_res = sync_proposals(conn, initial_per_dao=initial_proposals_per_dao)
     forum_res = fetch_forum_threads(conn, limit=20)
     vote_res = fetch_all_votes(conn, max_proposals=votes_proposals_limit)
     audit = audit_collection_status(conn)
@@ -56,21 +57,21 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="DAO Governance Data Audit & Sync")
     parser.add_argument("--check", action="store_true", help="Print audit report of collected dates and missing items")
     parser.add_argument("--sync-all", action="store_true", help="Fetch new proposals, missing forum posts, and missing votes")
-    parser.add_argument("--fetch-proposals", action="store_true", help="Fetch new proposals from Snapshot")
+    parser.add_argument("--fetch-proposals", action="store_true", help="Refresh unfinished proposals and add newly published ones")
     parser.add_argument("--fetch-votes", "--fetch-all-votes", dest="fetch_votes", action="store_true",
                         help="Fetch every vote for proposals whose votes are missing or partial")
     parser.add_argument("--space", default=None, help="Limit --fetch-votes to one DAO space id")
     parser.add_argument("--fetch-forum", action="store_true", help="Fetch every post of forum threads that are new, incomplete or recent")
-    parser.add_argument("--limit", type=int, default=10, help="Batch limit for votes or proposals (default: 10)")
+    parser.add_argument("--limit", type=int, default=10, help="Max proposals (votes) or threads (forum) to process per run (default: 10)")
 
     args = parser.parse_args()
     conn = get_connection()
 
     if args.sync_all:
-        res = sync_all(conn, proposals_first=args.limit, votes_proposals_limit=args.limit)
+        res = sync_all(conn, votes_proposals_limit=args.limit)
         print_audit_report(res["current_status"])
     elif args.fetch_proposals:
-        res = fetch_new_proposals(conn, first_per_dao=args.limit)
+        res = sync_proposals(conn)
         print(f"Proposals sync complete: {res}")
     elif args.fetch_votes:
         res = fetch_all_votes(conn, max_proposals=args.limit, space_id=args.space)

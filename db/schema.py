@@ -51,6 +51,8 @@ CREATE TABLE IF NOT EXISTS proposals (
     votes_count     INTEGER,
     scores_json     TEXT,                  -- JSON array, positionally matches choices
     scores_total    REAL,
+    scores_state    TEXT,                  -- Snapshot: 'pending' until results are final, then 'final'
+    created_ts      INTEGER,               -- when the proposal was published (cursor for new ones)
     start_ts        INTEGER,
     end_ts          INTEGER,
     link            TEXT,
@@ -136,8 +138,24 @@ def _migrate_forum_posts_key(conn):
     """)
 
 
+# Columns added after the first release. Older databases get them via ADD COLUMN
+# (existing rows start as NULL and are filled by the next proposals sync).
+ADDED_COLUMNS = {
+    "proposals": {"scores_state": "TEXT", "created_ts": "INTEGER"},
+}
+
+
+def _add_missing_columns(conn):
+    for table, columns in ADDED_COLUMNS.items():
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, sql_type in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+
+
 def _ensure_schema(conn):
     conn.executescript(SCHEMA)
+    _add_missing_columns(conn)
     _migrate_forum_posts_key(conn)
     conn.commit()
 

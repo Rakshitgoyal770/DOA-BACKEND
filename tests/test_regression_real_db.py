@@ -65,6 +65,13 @@ def test_forum_completeness_adds_up(conn):
     assert c["complete"] + c["partial"] + c["not_fetched"] + c["error"] == c["threads"]
 
 
+def test_every_proposal_has_publish_time_and_score_status(conn):
+    """Filled by the proposal sync; the 'new proposals' cursor depends on created_ts."""
+    missing = conn.execute(
+        "SELECT COUNT(*) FROM proposals WHERE created_ts IS NULL OR scores_state IS NULL").fetchone()[0]
+    assert missing == 0
+
+
 def test_audit_completeness_adds_up(conn):
     audit = audit_collection_status(conn)
     c = audit["votes"]["completeness"]
