@@ -1,27 +1,31 @@
 # features/chat/routes.py
 """
-POST /chat   — RAG-powered Q&A over DAO governance data.
+features/chat/routes.py — The POST /chat HTTP endpoint.
 
-Request body:
-  query       : str   — the user's question
-  proposal_id : str   — optional; scopes retrieval to a single proposal
-  n_results   : int   — number of chunks to retrieve (default 5)
+WHAT THIS FILE DOES
+    Accepts a question, runs the chat pipeline (features/chat/service.py
+    run_chat), and returns the answer together with the sources it used and
+    the database facts that were put in the prompt. HTTP layer only: no search,
+    SQL or LLM code lives here.
 
-Response:
-  answer      : str   — LLM answer with [Source N] citations
-  provider    : str   — which LLM answered (groq / gemini / openrouter / mistral)
-  sources     : list  — retrieved chunks with metadata
-  chunks_found: int   — how many chunks passed the distance threshold
-  query       : str   — echoed back for traceability
+WHERE IT SITS
+    client --HTTP--> main.py (router registered there) --> THIS FILE
+          --> features/chat/service.py run_chat --> retrieval / context / prompt / llm
+
+INPUTS (the JSON request body, validated by ChatRequest)
+    query       : str  — the question (3-2000 characters)
+    proposal_id : str  — optional; search only this proposal's chunks
+    n_results   : int  — chunks to retrieve before filtering (1-20, default 5)
+
+OUTPUT (ChatResponse)
+    answer, provider (which LLM answered), chunks_found, sources (each chunk with
+    author, wallet, voting power, distance), proposal_facts (the SQL facts used).
 """
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from features.chat.context import collect_facts, enrich_chunks
-from features.chat.retrieval import retrieve
-from features.chat.service import answer_question
-from db.schema import get_connection
+from features.chat.service import run_chat
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
 
@@ -42,10 +46,10 @@ class ChatRequest(BaseModel):
 class SourceChunk(BaseModel):
     id: str
     document: str
-    source_type: str          # "proposal_body" | "forum_post"
+    source_type: str                    # "proposal_body" | "forum_post"
     proposal_id: str | None
-    author: str | None        # present for forum_post sources
-    voting_power: float | None  # present when identity resolved
+    author: str | None                  # present for forum_post sources
+    voting_power: float | None          # present when the author's wallet voted on it
     distance: float
     wallet: str | None = None           # linked wallet for forum_post sources
     ens_name: str | None = None
@@ -62,63 +66,63 @@ class ChatResponse(BaseModel):
     proposal_facts: list[dict] = []     # SQL facts for the proposals behind the sources
 
 
+def _source(c: dict) -> SourceChunk:
+    """
+    One retrieved chunk as a SourceChunk for the response.
+
+    Parameter (where it comes from):
+        c - a chunk from run_chat()["chunks"]: retrieval fields + "sql" added by
+            features/chat/context.py enrich_chunks.
+    """
+    meta, sql = c["metadata"], c["sql"]
+    return SourceChunk(
+        id=c["id"],
+        document=c["document"],
+        source_type=meta.get("source_type", "unknown"),
+        proposal_id=meta.get("proposal_id"),
+        author=meta.get("author"),
+        voting_power=sql.get("voting_power", meta.get("voting_power")),
+        distance=round(c["distance"], 4),
+        wallet=sql.get("wallet"),
+        ens_name=sql.get("ens_name"),
+        link_confidence=sql.get("link_confidence"),
+        voted=sql.get("voted"),
+    )
+
+
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
 @router.post("", response_model=ChatResponse, summary="Ask a governance question")
 def chat(req: ChatRequest):
     """
-    Retrieves relevant chunks from the vector store (optionally scoped to a
-    single proposal), builds a cited prompt, and returns the LLM's answer
-    together with the source chunks that were used.
+    Retrieves relevant chunks (optionally scoped to one proposal), adds the
+    database facts, builds a cited prompt, and returns the LLM's answer with
+    the sources that were used.
 
-    Set `proposal_id` to restrict the context to one proposal — useful for
-    deep-dive questions like "who argued against this and why?".
-    Leave it null for cross-DAO or cross-proposal questions.
+    Set `proposal_id` for deep-dive questions about one proposal
+    ("who argued against this and why?"); leave it null for cross-DAO questions.
     """
-    where_filter = {"proposal_id": req.proposal_id} if req.proposal_id else None
-
-    chunks = retrieve(req.query, n_results=req.n_results, where=where_filter)
-
-    if not chunks:
+    result = run_chat(req.query, req.proposal_id, req.n_results)
+    if result["answer"] is None:
         raise HTTPException(
             status_code=404,
-            detail=(
-                "No relevant context found for this query. "
-                "Try broadening the question or removing the proposal_id filter."
-            )
+            detail=("No relevant context found for this query. "
+                    "Try broadening the question or removing the proposal_id filter."),
         )
-
-    conn = get_connection()
-    try:
-        enrich_chunks(conn, chunks)
-        facts = collect_facts(conn, chunks)
-    finally:
-        conn.close()
-
-    answer, provider = answer_question(req.query, chunks, facts)
-
-    sources = [
-        SourceChunk(
-            id=c["id"],
-            document=c["document"],
-            source_type=c["metadata"].get("source_type", "unknown"),
-            proposal_id=c["metadata"].get("proposal_id"),
-            author=c["metadata"].get("author"),
-            voting_power=c["sql"].get("voting_power", c["metadata"].get("voting_power")),
-            distance=round(c["distance"], 4),
-            wallet=c["sql"].get("wallet"),
-            ens_name=c["sql"].get("ens_name"),
-            link_confidence=c["sql"].get("link_confidence"),
-            voted=c["sql"].get("voted"),
-        )
-        for c in chunks
-    ]
-
     return ChatResponse(
         query=req.query,
-        answer=answer,
-        provider=provider,
-        chunks_found=len(chunks),
-        sources=sources,
-        proposal_facts=facts,
+        answer=result["answer"],
+        provider=result["provider"],
+        chunks_found=len(result["chunks"]),
+        sources=[_source(c) for c in result["chunks"]],
+        proposal_facts=result["facts"],
     )
+
+
+# ── Where control goes next ───────────────────────────────────────────────────
+# Usual next file: features/chat/service.py — run_chat() does the actual work.
+# After it returns, FastAPI sends ChatResponse as JSON and the request ends.
+# If no chunk is close enough: HTTP 404 (the LLM is never called).
+# If the request body is invalid (e.g. query shorter than 3 characters):
+#   FastAPI answers 422 before this code runs.
+# If every LLM provider fails: run_chat raises and the client gets HTTP 500.

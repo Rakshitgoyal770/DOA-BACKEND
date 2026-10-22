@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import db.schema as schema
-from features.chat import routes as chat_routes
+from features.chat import service as chat_service
 from features.chat.context import proposal_facts
 from features.forum.completeness import forum_completeness
 from features.sync.audit import audit_collection_status
@@ -87,6 +87,23 @@ def test_read_endpoints_respond(client, path):
     assert client.get(path).status_code == 200
 
 
+def test_golden_dataset_points_at_documents_that_exist():
+    """An id-format change once made 5 of 7 expected sources unfindable, which
+    would have scored the evaluation as if retrieval had failed."""
+    from eval.golden_dataset import GOLDEN_DATASET
+    from vector.embedding import get_collection
+    ids = [i for case in GOLDEN_DATASET for i in case["ground_truth_context_ids"]]
+    assert sorted(get_collection().get(ids=ids)["ids"]) == sorted(ids)
+
+
+def test_health_lists_every_registered_endpoint(client):
+    """The old hand-written list had fallen behind (it missed 5 identity endpoints)."""
+    endpoints = set(client.get("/").json()["endpoints"])
+    assert {"POST /chat", "GET  /daos", "GET  /proposals/{proposal_id}/concentration",
+            "POST /sync/run", "GET  /identities/proposal/{proposal_id}",
+            "GET  /identities/wallet/{wallet_address}", "GET  /identities/{username}"} <= endpoints
+
+
 @pytest.mark.parametrize("path", ["/daos/not-a-dao.eth", "/proposals/0xdead", "/identities/nobody_zzz"])
 def test_unknown_items_return_404(client, path):
     assert client.get(path).status_code == 404
@@ -101,8 +118,8 @@ def test_concentration_endpoint_matches_chat_facts(client, conn):
 def test_chat_merges_sql_facts_into_the_response(client, monkeypatch):
     chunk = {"id": "forum_post_x", "document": "I support this.", "distance": 0.4,
              "metadata": {"source_type": "forum_post", "proposal_id": DEFILLAMA, "author": "someone"}}
-    monkeypatch.setattr(chat_routes, "retrieve", lambda *a, **k: [dict(chunk)])
-    monkeypatch.setattr(chat_routes, "answer_question", lambda q, chunks, facts=None: ("stub", "stub"))
+    monkeypatch.setattr(chat_service, "retrieve", lambda *a, **k: [dict(chunk)])
+    monkeypatch.setattr(chat_service, "answer_question", lambda q, chunks, facts=None: ("stub", "stub"))
 
     body = client.post("/chat", json={"query": "Why did it pass?", "proposal_id": DEFILLAMA}).json()
 

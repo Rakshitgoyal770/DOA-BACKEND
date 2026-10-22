@@ -1,5 +1,23 @@
 # features/sync/audit.py
-"""Audit of what is stored in SQLite: date ranges, freshness, and what is missing."""
+"""
+features/sync/audit.py — Reports what data we have, how fresh it is, and what is incomplete.
+
+WHAT THIS FILE DOES
+    audit_collection_status() reads SQLite (never the network) and summarises:
+      * per DAO: number of proposals, date range, last fetch
+      * votes:   totals, date range, and COMPLETENESS (stored vs Snapshot's count,
+                 rule in features/votes/completeness.py)
+      * forum:   totals, date range, and COMPLETENESS (stored vs what Discourse
+                 listed, rule in features/forum/completeness.py)
+    print_audit_report() prints the same dict for the command line.
+
+WHERE IT SITS
+    GET /sync/status (features/sync/routes.py) ──┐
+    sync_all() and --check (features/sync/runner.py) ┴─> THIS FILE ─> SQLite (read-only)
+
+INPUTS
+    conn - an open SQLite connection, passed in by the callers above.
+"""
 
 import datetime
 from collections import Counter
@@ -14,11 +32,12 @@ MAX_LISTED_INCOMPLETE = 10   # how many incomplete proposals the audit names
 
 def audit_collection_status(conn) -> Dict[str, Any]:
     """
-    Inspects what data is stored in SQLite:
-    - Collection timestamps (fetched_at)
-    - Date ranges of governance proposals and forum posts
-    - Missing votes & missing forum posts
-    - Comparison with latest Snapshot metrics
+    The full audit as a dict: audit_timestamp, total_proposals, spaces, daos,
+    votes {..., completeness}, forum {..., completeness}.
+
+    Parameter (where it comes from):
+        conn - opened by get_sync_status() (GET /sync/status), or passed by
+               sync_all() / the --check CLI branch in features/sync/runner.py.
     """
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     
@@ -178,7 +197,13 @@ def audit_collection_status(conn) -> Dict[str, Any]:
 
 
 def print_audit_report(audit_data: Dict[str, Any]):
-    """Pretty prints the audit status to the console."""
+    """
+    Print the audit for a person reading the terminal.
+
+    Parameter (where it comes from):
+        audit_data - the dict returned by audit_collection_status(), passed by the
+                     --check and --sync-all branches of features/sync/runner.py.
+    """
     print("=" * 70)
     print("        DAO GOVERNANCE INTELLIGENCE — DATA COLLECTION AUDIT       ")
     print("=" * 70)
@@ -215,3 +240,10 @@ def print_audit_report(audit_data: Dict[str, Any]):
     print(f"  Forum Posts Date Range: {f['date_range']}")
     print(f"  Last Forum Fetch: {f['last_fetched']}")
     print("=" * 70)
+
+
+# ── Where control goes next ───────────────────────────────────────────────────
+# Control returns to the caller: the JSON response of GET /sync/status, the end of
+# sync_all(), or the printed report of the CLI.
+# If the audit shows incomplete data: run python -m features.sync.runner with
+#   --fetch-votes / --fetch-forum (add --limit 200 for a large backfill).

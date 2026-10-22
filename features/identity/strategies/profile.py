@@ -1,15 +1,38 @@
 # features/identity/strategies/profile.py
-"""Scan Discourse profiles (name / bio / website) of unresolved posters for a wallet or ENS name."""
+"""
+features/identity/strategies/profile.py — Link a forum user to a wallet via their Discourse profile.
+
+WHAT THIS FILE DOES
+    Some users put a wallet address or an ENS name in their forum profile
+    (name, bio, website). For the most active users that are not linked yet,
+    this fetches the profile and looks for either:
+        a 0x... wallet       -> method "profile_wallet"
+        an ENS name (x.eth)  -> resolved to a wallet -> method "profile_ens"
+    Confidence: "high" if that wallet voted in the user's DAO, else "medium"
+    (features/identity/common.py confidence_for).
+
+WHERE IT SITS
+    features/identity/runner.py resolve_all() --> THIS FILE
+        --> clients/discourse.py (profile), clients/ens.py (name -> wallet)
+        --> features/identity/common.py upsert_identity (writes the link)
+"""
 
 import time
-from urllib.parse import urlparse
 
-from clients.discourse import fetch_discourse_profile
+from clients.discourse import fetch_discourse_profile, forum_base_url
 from clients.ens import resolve_ens_name
 from features.identity.common import ENS_RE, WALLET_RE, confidence_for, upsert_identity
 
 
-def _forum_base_for(conn, username: str) -> str | None:
+def _a_thread_of(conn, username: str) -> str | None:
+    """
+    The discussion URL of one thread the user posted in (tells us which forum
+    their profile lives on), or None.
+
+    Parameters (where they come from — link_from_profiles below):
+        conn     - passed down.
+        username - a forum username from the query in link_from_profiles.
+    """
     row = conn.execute(
         """
         SELECT p.discussion_url FROM forum_posts f
@@ -18,14 +41,19 @@ def _forum_base_for(conn, username: str) -> str | None:
         """,
         (username.lower(),),
     ).fetchone()
-    if not row:
-        return None
-    u = urlparse(row["discussion_url"])
-    return f"{u.scheme}://{u.netloc}"
+    return row["discussion_url"] if row else None
 
 
 def link_from_profiles(conn, limit: int = 100, delay: float = 0.3) -> dict:
-    """Fetch profiles for the most active unresolved posters and look for a wallet/ENS."""
+    """
+    Fetch profiles of the `limit` most active unlinked posters and link any
+    wallet or ENS name found. Returns counts per method.
+
+    Parameters (where they come from — features/identity/runner.py resolve_all):
+        conn  - opened by the identity CLI or POST /identities/resolve.
+        limit - resolve_all's profile_limit (CLI --limit, API ?profile_limit=, default 100).
+        delay - pause between profile requests, to be polite to the forums.
+    """
     users = [r[0] for r in conn.execute(
         """
         SELECT f.username FROM forum_posts f
@@ -37,10 +65,10 @@ def link_from_profiles(conn, limit: int = 100, delay: float = 0.3) -> dict:
     )]
     fetched = wallet_links = ens_links = 0
     for username in users:
-        base = _forum_base_for(conn, username)
-        if not base:
+        thread = _a_thread_of(conn, username)
+        if not thread:
             continue
-        profile = fetch_discourse_profile(base, username)
+        profile = fetch_discourse_profile(forum_base_url(thread), username)
         time.sleep(delay)
         if not profile:
             continue
@@ -62,3 +90,10 @@ def link_from_profiles(conn, limit: int = 100, delay: float = 0.3) -> dict:
     conn.commit()
     return {"strategy": "profiles", "profiles_fetched": fetched,
             "profile_wallet": wallet_links, "profile_ens": ens_links}
+
+
+# ── Where control goes next ───────────────────────────────────────────────────
+# Control returns to features/identity/runner.py resolve_all(), which runs the
+# next strategy (strategies/self_disclosed.py).
+# If a profile cannot be fetched (unknown user, blocked, network): that user is
+#   skipped this run and tried again next run.

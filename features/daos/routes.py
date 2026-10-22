@@ -1,7 +1,18 @@
 # features/daos/routes.py
 """
-GET /daos        — List all curated DAOs with live stats.
-GET /daos/{id}   — Single DAO detail with per-proposal silence summary.
+features/daos/routes.py — The /daos HTTP endpoints.
+
+WHAT THIS FILE DOES
+    GET /daos              every curated DAO with its aggregated numbers
+    GET /daos/{space_id}   one DAO with its five most-voted proposals
+    HTTP layer only: the numbers come from features/daos/service.py.
+
+WHERE IT SITS
+    client --HTTP--> main.py --> THIS FILE --> features/daos/service.py
+                                           --> features/metrics.py --> SQLite
+
+INPUTS
+    space_id (URL path) — must be one of config/curated_daos.py.
 """
 
 from fastapi import APIRouter, HTTPException
@@ -23,9 +34,9 @@ class DAOSummary(BaseModel):
     about: str | None
     proposals_ingested: int
     proposals_with_forum: int
-    forum_coverage_pct: float          # % of proposals that have linked forum threads
-    avg_silence_ratio_pct: float       # avg forum_posters / votes_count across proposals
-    avg_top_choice_share_pct: float    # avg dominance of the winning choice
+    forum_coverage_pct: float          # % of proposals with at least one forum post
+    avg_silence_ratio_pct: float       # mean of forum posters ÷ voters across proposals
+    avg_top_choice_share_pct: float    # mean winning-choice share across proposals
 
 
 class DAODetail(DAOSummary):
@@ -38,13 +49,10 @@ class DAODetail(DAOSummary):
 @router.get("", response_model=list[DAOSummary], summary="List all curated DAOs")
 def list_daos():
     """
-    Returns all 5 curated DAOs with aggregated governance stats:
-    - Forum coverage (% of proposals with linked discussions)
-    - Average silence ratio (forum posters vs. total voters)
-    - Average winning-choice dominance (concentration of vote weight)
-
-    These stats surface the core insight: governance is decided by a
-    tiny fraction of token holders who never explain themselves publicly.
+    Returns all curated DAOs with aggregated governance stats:
+    - Forum coverage (% of proposals with forum discussion)
+    - Average silence ratio (forum posters vs. voters)
+    - Average winning-choice share (how one-sided votes are)
     """
     conn = get_connection()
     try:
@@ -66,17 +74,15 @@ def list_daos():
 @router.get("/{space_id}", response_model=DAODetail, summary="Single DAO with top proposals")
 def get_dao(space_id: str):
     """
-    Returns full detail for one DAO including its top 5 proposals by vote count,
-    each annotated with silence ratio and winning-choice concentration.
-
-    Use the `space_id` values from GET /daos (e.g. `arbitrumfoundation.eth`).
+    Full detail for one DAO, including its 5 most-voted proposals, each with its
+    silence ratio and winning-choice share. Use the `space_id` values from GET /daos
+    (e.g. `arbitrumfoundation.eth`).
     """
     known_ids = {dao["id"] for dao in CURATED_DAOS}
     if space_id not in known_ids:
         raise HTTPException(
             status_code=404,
-            detail=f"DAO '{space_id}' not in curated list. "
-                   f"Valid IDs: {sorted(known_ids)}"
+            detail=f"DAO '{space_id}' not in curated list. Valid IDs: {sorted(known_ids)}"
         )
 
     conn = get_connection()
@@ -84,13 +90,11 @@ def get_dao(space_id: str):
         space_row = get_space(conn, space_id)
         if not space_row:
             raise HTTPException(status_code=404,
-                                detail=f"DAO '{space_id}' not yet ingested into DB.")
-
-        dao_name = next(d["name"] for d in CURATED_DAOS if d["id"] == space_id)
+                                detail=f"DAO '{space_id}' not yet synced. Run: python -m features.sync.runner --sync-all")
 
         return DAODetail(
             id=space_id,
-            name=dao_name,
+            name=next(d["name"] for d in CURATED_DAOS if d["id"] == space_id),
             network=space_row["network"],
             about=space_row["about"],
             space_snapshot_url=f"https://snapshot.org/#/{space_id}",
@@ -99,3 +103,11 @@ def get_dao(space_id: str):
         )
     finally:
         conn.close()
+
+
+# ── Where control goes next ───────────────────────────────────────────────────
+# The response model is returned as JSON and the request ends. To see how each
+# number is computed, read features/daos/service.py, then features/metrics.py.
+# If the DAO is not curated: 404 listing the valid ids.
+# If it is curated but its space row is missing: 404 asking for a sync
+#   (features/proposals/fetch.py refresh_spaces writes that row).

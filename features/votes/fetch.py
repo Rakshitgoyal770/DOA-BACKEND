@@ -1,6 +1,6 @@
 # features/votes/fetch.py
 """
-Download votes from Snapshot until every proposal's vote data is complete.
+features/votes/fetch.py — Downloads votes until every proposal's vote data is complete.
 
 How it works, step by step:
   1. Ask `vote_completeness` which proposals are `missing` or `partial`.
@@ -8,6 +8,12 @@ How it works, step by step:
      vote we already have (so a re-run only downloads what is new).
   3. Save votes in batches. Each vote has a fixed key (proposal + voter), so
      saving the same vote twice updates it instead of creating a duplicate.
+
+WHERE IT SITS
+    features/sync/runner.py sync_all()  (POST /sync/run, --sync-all, --fetch-votes)
+        --> THIS FILE --> clients/snapshot.py iter_all_votes (network) and SQLite (writes)
+    It runs after the proposal sync, because it compares each proposal's
+    votes_count (refreshed there) with the votes stored here.
 """
 
 import datetime
@@ -32,7 +38,14 @@ _UPSERT_VOTE_SQL = """
 
 
 def _save_votes(conn, rows: list[tuple]) -> int:
-    """Write one batch of vote rows and commit. Returns how many were written."""
+    """
+    Write one batch of vote rows and commit. Returns how many were written.
+
+    Parameters (where they come from — fetch_all_votes below):
+        conn - passed down.
+        rows - up to SAVE_BATCH_SIZE tuples in _UPSERT_VOTE_SQL column order.
+    Committing per batch means an interrupted run keeps what it already saved.
+    """
     if rows:
         conn.executemany(_UPSERT_VOTE_SQL, rows)
         conn.commit()
@@ -48,6 +61,12 @@ def fetch_all_votes(conn, max_proposals: int = 10, space_id: str | None = None) 
     Returns {"proposals_processed": n, "votes_ingested": n, "failed": [ids]}.
     "Processed" means the download finished without an error; the audit
     (vote_completeness) is what says whether the data is now complete.
+
+    Parameters (where they come from — features/sync/runner.py):
+        conn          - opened by sync_all() or the --fetch-votes CLI branch.
+        max_proposals - sync_all's votes_proposals_limit (POST /sync/run ?limit=,
+                        default 10) or the CLI --limit (use 200 for a backfill).
+        space_id      - the CLI --space flag (one DAO), else None.
     """
     todo = [r for r in vote_completeness(conn, space_id) if r["status"] in (MISSING, PARTIAL)]
     todo.sort(key=lambda r: r["expected"])
@@ -80,3 +99,12 @@ def fetch_all_votes(conn, max_proposals: int = 10, space_id: str | None = None) 
             logger.error(f"  Failed votes for {p['proposal_id']}: {e}")
 
     return {"proposals_processed": processed, "votes_ingested": total, "failed": failed}
+
+
+# ── Where control goes next ───────────────────────────────────────────────────
+# Usual next file: features/sync/runner.py — sync_all() finishes with the audit
+#   (features/sync/audit.py), whose vote "completeness" section reports the result.
+# Votes feed: features/metrics.py (whale shares) and features/chat/context.py
+#   (what a forum author voted), and identity upgrades (features/identity/runner.py --upgrade).
+# If one proposal fails: its id is in "failed", the others continue, and the next
+#   run resumes it from its newest stored vote.

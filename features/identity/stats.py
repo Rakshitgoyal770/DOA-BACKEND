@@ -1,8 +1,26 @@
 # features/identity/stats.py
-"""Coverage numbers for forum-user -> wallet links."""
+"""
+features/identity/stats.py — Coverage numbers for forum-user -> wallet links.
+
+WHAT THIS FILE DOES
+    identity_stats() answers "how much of the forum can we tie to voting power?":
+    users and posts linked, the share at medium confidence or better, how many
+    posts carry the author's voting power on that proposal, and breakdowns by
+    method and confidence.
+
+WHERE IT SITS
+    GET /identities/stats (features/identity/routes.py) and
+    features/identity/runner.py (end of every run)  --> THIS FILE --> SQLite (read-only)
+"""
 
 
 def identity_stats(conn) -> dict:
+    """
+    Parameter (where it comes from):
+        conn - opened by get_identity_stats() or passed by resolve_all() / rescore().
+    Note: forum_posts has one row per (proposal, post), so a post in a thread that
+    two proposals link counts once per proposal.
+    """
     total_users = conn.execute("SELECT COUNT(DISTINCT lower(username)) FROM forum_posts").fetchone()[0]
     total_posts = conn.execute("SELECT COUNT(*) FROM forum_posts").fetchone()[0]
     by_method = {r[0]: r[1] for r in conn.execute(
@@ -35,3 +53,8 @@ def identity_stats(conn) -> dict:
         "by_method": by_method,
         "by_confidence": by_conf,
     }
+
+
+# ── Where control goes next ───────────────────────────────────────────────────
+# Control returns to the caller: GET /identities/stats adds a per-DAO breakdown and
+# responds; the runner includes these stats in its printed / stored result.

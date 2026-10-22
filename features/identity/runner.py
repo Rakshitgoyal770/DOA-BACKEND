@@ -1,10 +1,29 @@
 # features/identity/runner.py
 """
-Runs the identity-linking strategies, strongest evidence first, and exposes the command line.
+features/identity/runner.py — Runs the identity-linking strategies, and the identity command line.
 
-    python -m features.identity.runner --all [--voters 400] [--limit 150]
-    python -m features.identity.runner --upgrade       # offline: re-check self-disclosed links, re-score
-    python -m features.identity.runner --stats
+WHAT THIS FILE DOES
+    Links forum usernames to voting wallets by running every strategy in
+    features/identity/strategies/, strongest evidence first. Because
+    upsert_identity never replaces a stronger link, running the weaker
+    strategies afterwards cannot spoil the strong ones.
+        registry        hand-verified list                  -> certain
+        ens_username    username is an ENS name             -> medium / high
+        voter_ens       a voter's verified ENS = username   -> medium / high
+        profile         wallet / ENS in the forum profile   -> medium / high
+        self_disclosed  "my wallet is 0x..." in a post      -> low
+        upgrade         raise links whose wallet voted in the user's DAO -> high
+
+COMMAND LINE
+    python -m features.identity.runner --all [--voters 300] [--limit 100]   # network: minutes
+    python -m features.identity.runner --upgrade     # offline, seconds: after new votes / posts
+    python -m features.identity.runner --stats       # coverage numbers only
+
+WHERE IT SITS
+    the command line above            --+
+    POST /identities/resolve (routes) --+--> THIS FILE --> strategies/*.py --> SQLite
+    Run it after a data sync (features/sync/runner.py) and before the index sync
+    (vector/embedding.py), which copies the links into the search metadata.
 """
 
 import argparse
@@ -21,7 +40,14 @@ from features.identity.strategies.voter_ens import cache_voter_ens, link_voter_e
 
 
 def resolve_all(conn, profile_limit: int = 100, voter_wallets: int = 300) -> dict:
-    """Run every strategy; stronger evidence is written first and is never overwritten by weaker."""
+    """
+    Every strategy, in the order above. Returns {"usernames_normalized", "steps", "stats"}.
+
+    Parameters (where they come from):
+        conn          - opened by the CLI below or _run_resolution() in features/identity/routes.py.
+        profile_limit - CLI --limit / ?profile_limit=: forum profiles to scan (network).
+        voter_wallets - CLI --voters / ?voter_wallets=: top voter wallets to reverse-resolve (network).
+    """
     normalized = normalize_usernames(conn)
     steps = [
         link_registry(conn),
@@ -37,7 +63,13 @@ def resolve_all(conn, profile_limit: int = 100, voter_wallets: int = 300) -> dic
 
 
 def rescore(conn) -> dict:
-    """Cheap, offline: re-check self-disclosed links, then promote links using loaded votes."""
+    """
+    The offline part only: re-check self-disclosed links, then promote links using
+    the votes now stored. Takes seconds, so run it after every data sync.
+
+    Parameter (where it comes from):
+        conn - opened by the --upgrade CLI branch below.
+    """
     return {"usernames_normalized": normalize_usernames(conn),
             "steps": [link_self_disclosed(conn), upgrade_self_disclosed(conn), upgrade_medium_links(conn)],
             "stats": identity_stats(conn)}
@@ -60,3 +92,10 @@ if __name__ == "__main__":
     else:
         print(identity_stats(conn))
     conn.close()
+
+
+# ── Where control goes next ───────────────────────────────────────────────────
+# From the command line: the result is printed and the program ends.
+# From POST /identities/resolve: the result is stored for GET /identities/resolve/status.
+# Recommended next step: python -m vector.embedding (copies the new links into the
+#   search index metadata). The chat already sees new links immediately.

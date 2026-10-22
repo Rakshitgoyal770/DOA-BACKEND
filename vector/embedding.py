@@ -1,6 +1,6 @@
 # vector/embedding.py
 """
-Keeps the ChromaDB search index in step with SQLite, touching only what changed.
+vector/embedding.py — Keeps the ChromaDB search index in step with SQLite, touching only what changed.
 
 What goes into the index (each item is a "document"):
   * proposal body chunks   id: proposal_<proposal_id>_<n>
@@ -18,7 +18,11 @@ For every document, a sync compares SQLite (what it should be) with Chroma
 So a normal run after a sync embeds only the handful of new posts, and an
 identity change (e.g. a newly linked wallet) is a cheap metadata update.
 
-Run:
+WHERE IT SITS
+    SQLite (proposals, forum_posts, identities, votes) --> THIS FILE --> ChromaDB (chroma_data/)
+    Read back at question time by features/chat/retrieval.py (get_model, get_collection).
+
+Run (after a data sync and the identity re-check):
     python -m vector.embedding            # sync the index
     python -m vector.embedding --dry-run  # only report what would change
 """
@@ -58,7 +62,12 @@ def get_collection():
 # ── What the index SHOULD contain, built from SQLite ─────────────────────────
 
 def proposal_documents(conn) -> dict[str, tuple[str, dict]]:
-    """{doc_id: (text, metadata)} for every chunk of every proposal body."""
+    """
+    {doc_id: (text, metadata)} for every chunk of every proposal body.
+
+    Parameter (where it comes from):
+        conn - passed down from sync_index().
+    """
     docs = {}
     for p in conn.execute("SELECT id, space_id, title, body FROM proposals"):
         for i, text in enumerate(chunk_proposal_body(p["body"])):
@@ -78,6 +87,9 @@ def forum_documents(conn) -> dict[str, tuple[str, dict]]:
     If the author is linked to a wallet, the metadata also carries the wallet,
     the link confidence, and the wallet's voting power on THIS proposal.
     Wallets are compared lower-case: Snapshot writes them in mixed case.
+
+    Parameter (where it comes from):
+        conn - passed down from sync_index().
     """
     rows = conn.execute("""
         SELECT f.id, f.proposal_id, f.username, f.content,
@@ -104,7 +116,13 @@ def forum_documents(conn) -> dict[str, tuple[str, dict]]:
 # ── What the index DOES contain ──────────────────────────────────────────────
 
 def indexed_documents(collection, page_size: int = 1000) -> dict[str, tuple[str, dict]]:
-    """{doc_id: (text, metadata)} currently stored in Chroma, read page by page."""
+    """
+    {doc_id: (text, metadata)} currently stored in Chroma, read page by page.
+
+    Parameters (where they come from):
+        collection - from sync_index() (the real one, or a test's in-memory one).
+        page_size  - documents read per request.
+    """
     docs, offset = {}, 0
     while True:
         page = collection.get(include=["documents", "metadatas"], limit=page_size, offset=offset)
@@ -124,6 +142,9 @@ def same_metadata(a: dict, b: dict) -> bool:
     Floats are compared with a tiny tolerance: Chroma hands back e.g.
     95848.83524269491 for a stored 95848.83524269493, and a plain `==` would
     treat that as a change and rewrite the document on every sync.
+
+    Parameters (where they come from): the stored and the wanted metadata of one
+    document, from plan_changes().
     """
     if a.keys() != b.keys():
         return False
@@ -138,7 +159,13 @@ def same_metadata(a: dict, b: dict) -> bool:
 
 
 def plan_changes(wanted: dict, current: dict) -> dict[str, list[str]]:
-    """Sort every document id into embed / update_metadata / delete / unchanged."""
+    """
+    Sort every document id into embed / update_metadata / delete / unchanged.
+
+    Parameters (where they come from — sync_index):
+        wanted  - proposal_documents() + forum_documents(): what SQLite says should exist.
+        current - indexed_documents(): what Chroma holds now.
+    """
     plan = {"embed": [], "update_metadata": [], "delete": [], "unchanged": []}
     for doc_id, (text, metadata) in wanted.items():
         if doc_id not in current or current[doc_id][0] != text:
@@ -159,6 +186,9 @@ def metadata_patch(old: dict | None, new: dict) -> dict:
     Chroma MERGES metadata on update/upsert: a key we leave out is kept. So when
     a field should disappear (e.g. a wallet link was removed), we must send it
     as None, which tells Chroma to delete that key.
+
+    Parameters (where they come from): the document's stored metadata (None for a
+    new document) and its wanted metadata, from sync_index().
     """
     patch = dict(new)
     for key in old or {}:
@@ -179,6 +209,12 @@ def sync_index(conn, collection=None, model=None, dry_run: bool = False) -> dict
 
     `collection` and `model` default to the real ones; tests pass small fakes.
     The model is only loaded if something actually needs embedding.
+
+    Parameters (where they come from):
+        conn       - opened by the command line below.
+        collection - None = the real index (get_collection); tests pass an in-memory one.
+        model      - None = the real model (get_model); tests pass a fake.
+        dry_run    - the --dry-run flag: report the plan, write nothing.
     """
     collection = collection if collection is not None else get_collection()
     wanted = {**proposal_documents(conn), **forum_documents(conn)}
@@ -219,3 +255,10 @@ if __name__ == "__main__":
     conn = get_connection()
     print(sync_index(conn, dry_run=args.dry_run))
     conn.close()
+
+
+# ── Where control goes next ───────────────────────────────────────────────────
+# From the command line: the counts are printed and the program ends.
+# The index is read at question time by features/chat/retrieval.py.
+# If you change the model, chunk size or document ids: the next sync re-embeds
+#   everything affected (a few minutes on CPU); run with --dry-run first to see how much.

@@ -1,40 +1,41 @@
 # features/proposals/service.py
-"""Proposal queries and governance metrics (silence ratio, winning share, whale concentration)."""
+"""
+features/proposals/service.py — Proposal queries for the proposal endpoints.
 
-import json
+WHAT THIS FILE DOES
+    Reads proposals from SQLite for features/proposals/routes.py:
+      * list_proposals  filtered, most-voted-first list (with forum poster counts)
+      * get_proposal    one proposal plus how many of its votes we store
+      * concentration   the whale report: largest wallets and their share
+    The numbers themselves (silence ratio, winning share, top-voter share,
+    choice names) come from features/metrics.py.
 
+WHERE IT SITS
+    HTTP request -> features/proposals/routes.py -> THIS FILE -> features/metrics.py
+                                                     (SQLite reads only)
 
-def silence_ratio(votes_count: int | None, forum_posters: int) -> float | None:
-    """forum_posters / votes_count as a percentage."""
-    if votes_count and votes_count > 0:
-        return round(forum_posters / votes_count * 100, 3)
-    return None
+INPUTS
+    conn - an open SQLite connection; the route handler opens it with
+           db.schema.get_connection() and closes it afterwards.
+    Everything else comes from the request: URL path (proposal_id) or the query
+    string (space_id, state, limit, skip, top_n), validated by FastAPI first.
+"""
 
-
-def top_choice_share(scores_json: str | None, scores_total: float | None) -> float | None:
-    """Winning choice's share of total voting weight, as a percentage."""
-    if not scores_json or not scores_total or scores_total == 0:
-        return None
-    try:
-        scores = json.loads(scores_json)
-        return round(max(scores) / scores_total * 100, 1) if scores else None
-    except Exception:
-        return None
-
-
-def decode_choice(choice_json: str, choices: list):
-    """Snapshot uses 1-indexed integers for single choice; anything else is returned as stored."""
-    try:
-        raw = json.loads(choice_json)
-        if isinstance(raw, int) and 0 < raw <= len(choices):
-            return choices[raw - 1]
-        return raw
-    except Exception:
-        return choice_json
+from features.metrics import FORUM_POSTERS_SQL, top_voter_share
 
 
 def list_proposals(conn, space_id: str | None, state: str | None, limit: int, skip: int):
-    """Proposal rows (with distinct forum poster count), most-voted first."""
+    """
+    Proposal rows with their forum poster count, most-voted first.
+
+    Parameters (where they come from — all from GET /proposals query string):
+        conn     - opened by features/proposals/routes.py list_proposals.
+        space_id - ?space_id= (optional) to keep one DAO.
+        state    - ?state= (optional): active | closed | pending.
+        limit    - ?limit= page size (1-100, default 20).
+        skip     - ?skip= how many to skip, for paging.
+    Returns sqlite3.Row objects; the route turns them into ProposalSummary.
+    """
     clauses, params = [], []
     if space_id:
         clauses.append("p.space_id = ?")
@@ -48,7 +49,7 @@ def list_proposals(conn, space_id: str | None, state: str | None, limit: int, sk
         SELECT p.id, p.space_id, p.title, p.state, p.votes_count,
                p.scores_json, p.scores_total, p.link, p.discussion_url,
                p.author, p.start_ts, p.end_ts,
-               COUNT(DISTINCT fp.username) as forum_posters
+               {FORUM_POSTERS_SQL} AS forum_posters
         FROM proposals p
         LEFT JOIN forum_posts fp ON fp.proposal_id = p.id
         {where_sql}
@@ -59,9 +60,16 @@ def list_proposals(conn, space_id: str | None, state: str | None, limit: int, sk
 
 
 def get_proposal(conn, proposal_id: str):
-    """One proposal row with forum poster count and stored vote count, or None."""
-    row = conn.execute("""
-        SELECT p.*, COUNT(DISTINCT fp.username) as forum_posters
+    """
+    One proposal row (all columns + forum_posters) and its stored vote count,
+    as (row, votes_ingested), or None if it does not exist.
+
+    Parameters (where they come from):
+        conn        - opened by features/proposals/routes.py get_proposal.
+        proposal_id - the URL path of GET /proposals/{proposal_id}.
+    """
+    row = conn.execute(f"""
+        SELECT p.*, {FORUM_POSTERS_SQL} AS forum_posters
         FROM proposals p
         LEFT JOIN forum_posts fp ON fp.proposal_id = p.id
         WHERE p.id = ?
@@ -70,57 +78,53 @@ def get_proposal(conn, proposal_id: str):
     if not row:
         return None
     votes_ingested = conn.execute(
-        "SELECT COUNT(*) as c FROM votes WHERE proposal_id = ?", (proposal_id,)
-    ).fetchone()["c"]
+        "SELECT COUNT(*) FROM votes WHERE proposal_id = ?", (proposal_id,)
+    ).fetchone()[0]
     return row, votes_ingested
 
 
 def concentration(conn, proposal_id: str, top_n: int):
     """
-    Voting-power concentration of a proposal's stored votes.
-    Returns None if the proposal does not exist, or a dict (total_voters_ingested == 0 if no votes stored).
+    The whale report for GET /proposals/{id}/concentration.
+
+    Parameters (where they come from):
+        conn        - opened by features/proposals/routes.py get_concentration.
+        proposal_id - the URL path.
+        top_n       - ?top_n= (1-50, default 4).
+
+    Returns None if the proposal does not exist; otherwise the fields of
+    ConcentrationReport (total_voters_ingested == 0 means no votes are stored).
+    The share itself is metrics.top_voter_share, the same number the chat uses.
     """
-    p = conn.execute(
-        "SELECT title, choices_json, votes_count FROM proposals WHERE id = ?", (proposal_id,)
-    ).fetchone()
-    if not p:
+    report = top_voter_share(conn, proposal_id, top_n)
+    if report is None:
         return None
+    if report["stored_votes"] == 0:
+        return {"title": report["title"], "total_voters_ingested": 0}
 
-    choices = json.loads(p["choices_json"]) if p["choices_json"] else []
-    all_votes = conn.execute("""
-        SELECT voter, vp, choice_json
-        FROM votes
-        WHERE proposal_id = ?
-        ORDER BY vp DESC
-    """, (proposal_id,)).fetchall()
-    if not all_votes:
-        return {"title": p["title"], "total_voters_ingested": 0}
-
-    total_vp = sum(v["vp"] for v in all_votes if v["vp"])
-    top_votes = all_votes[:top_n]
-    top_vp = sum(v["vp"] for v in top_votes if v["vp"])
-
-    stored, expected = len(all_votes), p["votes_count"] or 0
-    if expected and stored < expected * 0.999:
-        note = (f"Partial data: {stored} of {expected} votes are stored, so shares are measured "
-                f"against the stored votes only and may differ from the full tally.")
+    if report["partial"]:
+        note = (f"Partial data: {report['stored_votes']} of {report['expected_votes']} votes are "
+                "stored; shares are measured against Snapshot's full tally.")
     else:
-        note = f"Complete data: all {stored} votes are stored."
+        note = f"Complete data: all {report['stored_votes']} votes are stored."
 
     return {
-        "title": p["title"],
-        "total_voters_ingested": stored,
-        "total_voting_power": round(total_vp, 2),
-        "top_n_power": round(top_vp, 2),
-        "top_n_share_pct": round(top_vp / total_vp * 100, 1) if total_vp else 0,
-        "top_voters": [
-            {
-                "voter": v["voter"],
-                "voting_power": round(v["vp"], 4),
-                "power_share_pct": round(v["vp"] / total_vp * 100, 2) if total_vp else 0,
-                "choice": decode_choice(v["choice_json"], choices),
-            }
-            for v in top_votes
-        ],
+        "title": report["title"],
+        "total_voters_ingested": report["stored_votes"],
+        "total_voting_power": report["total_voting_power"],
+        "top_n_power": report["top_n_power"],
+        "top_n_share_pct": report["top_n_share_pct"],
+        "top_voters": report["top_voters"],
         "note": note,
     }
+
+
+# ── Where control goes next ───────────────────────────────────────────────────
+# Control returns to features/proposals/routes.py, which adds the per-row
+# numbers (metrics.silence_ratio_pct / winning_share_pct) and builds the
+# response models sent to the client.
+# If the proposal does not exist: get_proposal / concentration return None and
+#   the route answers 404.
+# If its votes are not stored yet: concentration returns total_voters_ingested=0
+#   and the route answers 404 with "run the vote ingestion first"
+#   (python -m features.sync.runner --fetch-votes).

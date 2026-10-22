@@ -1,15 +1,31 @@
 # features/proposals/routes.py
 """
-GET /proposals                    — List proposals with filters and governance stats.
-GET /proposals/{proposal_id}      — Full proposal detail with vote concentration.
-GET /proposals/{proposal_id}/concentration  — Top-N voter whale analysis.
+features/proposals/routes.py — The /proposals HTTP endpoints.
+
+WHAT THIS FILE DOES
+    GET /proposals                             list proposals (filter, page)
+    GET /proposals/{proposal_id}               one proposal in detail
+    GET /proposals/{proposal_id}/concentration whale report: largest wallets
+    This is the HTTP layer only: it validates input (FastAPI does that from the
+    function signatures), opens a database connection, asks
+    features/proposals/service.py for the data, and shapes the JSON response.
+
+WHERE IT SITS
+    client --HTTP--> main.py (router registered there) --> THIS FILE
+          --> features/proposals/service.py --> features/metrics.py --> SQLite
+
+INPUTS
+    Path and query parameters of the request (documented on each endpoint and
+    shown at /docs). The database connection is opened here per request.
 """
 
 import json
+
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from db.schema import get_connection
+from features.metrics import silence_ratio_pct, winning_share_pct
 from features.proposals import service
 
 router = APIRouter(prefix="/proposals", tags=["Proposals"])
@@ -24,8 +40,8 @@ class ProposalSummary(BaseModel):
     state: str | None
     votes_count: int | None
     forum_posters: int
-    silence_ratio_pct: float | None     # forum_posters / votes_count as %
-    top_choice_share_pct: float | None  # winning choice % of total weight
+    silence_ratio_pct: float | None     # forum posters as % of voters
+    top_choice_share_pct: float | None  # winning choice % of total voting power
     scores_total: float | None
     link: str | None
     discussion_url: str | None
@@ -38,7 +54,7 @@ class VoterEntry(BaseModel):
     voter: str
     voting_power: float
     power_share_pct: float
-    choice: str | int | dict | list     # Snapshot choice can be any of these
+    choice: str | int | dict | list | None   # names: "For", ["For", "Option D"], {"For": 2}
 
 
 class ConcentrationReport(BaseModel):
@@ -60,6 +76,32 @@ class ProposalDetail(ProposalSummary):
     votes_ingested: int                 # how many individual votes are in our DB
 
 
+def _summary_fields(row) -> dict:
+    """
+    The ProposalSummary fields of one proposal row (shared by list and detail).
+
+    Parameter (where it comes from):
+        row - a proposals row with a `forum_posters` column, returned by
+              service.list_proposals or service.get_proposal.
+    """
+    return {
+        "id": row["id"],
+        "space_id": row["space_id"],
+        "title": row["title"],
+        "state": row["state"],
+        "votes_count": row["votes_count"],
+        "forum_posters": row["forum_posters"],
+        "silence_ratio_pct": silence_ratio_pct(row["forum_posters"], row["votes_count"]),
+        "top_choice_share_pct": winning_share_pct(row["scores_json"], row["scores_total"]),
+        "scores_total": row["scores_total"],
+        "link": row["link"],
+        "discussion_url": row["discussion_url"],
+        "author": row["author"],
+        "start_ts": row["start_ts"],
+        "end_ts": row["end_ts"],
+    }
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("", response_model=list[ProposalSummary], summary="List proposals")
@@ -75,75 +117,37 @@ def list_proposals(
     Returns proposals with silence and concentration metrics pre-computed.
 
     Key fields:
-    - `silence_ratio_pct`: % of voters who also posted in the forum discussion.
-      Values below 1% indicate the vote was decided largely without public deliberation.
-    - `top_choice_share_pct`: % of total voting weight captured by the winning choice.
-      Values near 100% indicate a one-sided, uncontested vote.
+    - `silence_ratio_pct`: forum posters as a % of voters. Below 1% means the
+      vote was decided largely without public deliberation.
+    - `top_choice_share_pct`: % of total voting power captured by the winning
+      choice. Near 100% means a one-sided, uncontested vote.
     """
     conn = get_connection()
     try:
         rows = service.list_proposals(conn, space_id, state, limit, skip)
-
-        return [
-            ProposalSummary(
-                id=r["id"],
-                space_id=r["space_id"],
-                title=r["title"],
-                state=r["state"],
-                votes_count=r["votes_count"],
-                forum_posters=r["forum_posters"],
-                silence_ratio_pct=service.silence_ratio(r["votes_count"], r["forum_posters"]),
-                top_choice_share_pct=service.top_choice_share(r["scores_json"], r["scores_total"]),
-                scores_total=r["scores_total"],
-                link=r["link"],
-                discussion_url=r["discussion_url"],
-                author=r["author"],
-                start_ts=r["start_ts"],
-                end_ts=r["end_ts"],
-            )
-            for r in rows
-        ]
+        return [ProposalSummary(**_summary_fields(r)) for r in rows]
     finally:
         conn.close()
 
 
-@router.get("/{proposal_id}", response_model=ProposalDetail,
-            summary="Full proposal detail")
+@router.get("/{proposal_id}", response_model=ProposalDetail, summary="Full proposal detail")
 def get_proposal(proposal_id: str):
     """
-    Returns full proposal including body preview, vote breakdown, and
-    counts of forum participants and ingested individual votes.
+    Returns full proposal including body preview, vote breakdown, and counts of
+    forum participants and stored individual votes.
     """
     conn = get_connection()
     try:
         found = service.get_proposal(conn, proposal_id)
         if not found:
-            raise HTTPException(status_code=404,
-                                detail=f"Proposal '{proposal_id}' not found.")
+            raise HTTPException(status_code=404, detail=f"Proposal '{proposal_id}' not found.")
         row, votes_ingested = found
-
-        choices = json.loads(row["choices_json"]) if row["choices_json"] else []
-        scores = json.loads(row["scores_json"]) if row["scores_json"] else []
         body = row["body"] or ""
-
         return ProposalDetail(
-            id=row["id"],
-            space_id=row["space_id"],
-            title=row["title"],
-            state=row["state"],
-            votes_count=row["votes_count"],
-            forum_posters=row["forum_posters"],
-            silence_ratio_pct=service.silence_ratio(row["votes_count"], row["forum_posters"]),
-            top_choice_share_pct=service.top_choice_share(row["scores_json"], row["scores_total"]),
-            scores_total=row["scores_total"],
-            link=row["link"],
-            discussion_url=row["discussion_url"],
-            author=row["author"],
-            start_ts=row["start_ts"],
-            end_ts=row["end_ts"],
+            **_summary_fields(row),
             body_preview=body[:500] + ("..." if len(body) > 500 else ""),
-            choices=choices,
-            scores=scores,
+            choices=json.loads(row["choices_json"]) if row["choices_json"] else [],
+            scores=json.loads(row["scores_json"]) if row["scores_json"] else [],
             votes_ingested=votes_ingested,
         )
     finally:
@@ -158,30 +162,19 @@ def get_concentration(
                        description="How many top voters to analyze (default 4)")
 ):
     """
-    Computes the voting power concentration for a proposal.
-
-    Returns the top-N voters by voting power and their combined share of
-    total weight — the core 'whale' metric of this platform.
-
-    Example: top_n=4 showing 84% means 4 wallets controlled 84% of the outcome.
-
-    Note: Individual votes are only available for proposals where
-    `votes_ingested > 0` (use GET /proposals/{id} to check).
-    Ingest votes first via the ingestion pipeline if this returns an empty list.
+    Voting-power concentration: the top-N wallets and their combined share of
+    all voting power. Example: top_n=4 showing 54% means 4 wallets held 54%.
     """
     conn = get_connection()
     try:
         report = service.concentration(conn, proposal_id, top_n)
         if report is None:
-            raise HTTPException(status_code=404,
-                                detail=f"Proposal '{proposal_id}' not found.")
+            raise HTTPException(status_code=404, detail=f"Proposal '{proposal_id}' not found.")
         if report["total_voters_ingested"] == 0:
             raise HTTPException(
                 status_code=404,
-                detail=(
-                    f"No individual votes ingested for proposal '{proposal_id}'. "
-                    "Run the vote ingestion pipeline first."
-                )
+                detail=(f"No individual votes ingested for proposal '{proposal_id}'. "
+                        "Run: python -m features.sync.runner --fetch-votes"),
             )
         return ConcentrationReport(
             proposal_id=proposal_id,
@@ -191,3 +184,12 @@ def get_concentration(
         )
     finally:
         conn.close()
+
+
+# ── Where control goes next ───────────────────────────────────────────────────
+# Each endpoint returns its response model; FastAPI turns it into JSON and the
+# request is finished. Data comes from features/proposals/service.py (read it next
+# to see the queries) and the formulas from features/metrics.py.
+# If the proposal id is unknown: HTTP 404.
+# If the client sends invalid parameters (e.g. limit=500): FastAPI answers 422
+#   before this code runs.

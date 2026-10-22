@@ -1,33 +1,37 @@
 # main.py
 """
-DAO Governance Intelligence — FastAPI Backend
-=============================================
+main.py — Creates the web API and connects every feature to it.
 
-Runs a RAG-powered API over governance data ingested from Snapshot (on-chain
-votes) and Discourse (forum discussions) for 5 major DAOs.
+WHAT THIS FILE DOES
+    Builds the FastAPI app, allows browser access (CORS), registers one router
+    per feature, makes sure the database schema exists at startup, and answers
+    the health check at "/". No business logic lives here.
 
-Start server:
+START THE SERVER
     uvicorn main:app --reload --port 8000
+    Interactive API docs: http://127.0.0.1:8000/docs  (and /redoc)
 
-Interactive API docs (auto-generated):
-    http://127.0.0.1:8000/docs
-    http://127.0.0.1:8000/redoc
+THE FEATURES (each router lives in features/<name>/routes.py)
+    /daos         DAO summaries               features/daos/
+    /proposals    proposals, whale reports    features/proposals/
+    /chat         RAG question answering      features/chat/
+    /sync         data audit and sync         features/sync/
+    /identities   forum user <-> wallet links features/identity/
 
-Key findings surfaced by this system (measured on real data):
-  - Fewer than 1.5% of voters ever post in governance forums
-  - Median top-4 voter concentration: ~84% of total voting power
-  - 100% of 100 ingested proposals have linked forum discussions
+HOW A REQUEST FLOWS
+    client -> this app -> the matching router -> its service / metrics code -> SQLite
+    (/chat also goes through ChromaDB and an LLM; /sync/run also calls Snapshot and Discourse)
 """
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from db.schema import init_db
 from features.chat.routes import router as chat_router
 from features.daos.routes import router as dao_router
 from features.identity.routes import router as identity_router
 from features.proposals.routes import router as proposal_router
 from features.sync.routes import router as sync_router
-from db.schema import init_db
 
 
 # ── App setup ─────────────────────────────────────────────────────────────────
@@ -37,13 +41,12 @@ app = FastAPI(
     description=(
         "RAG-powered Q&A and analytics over DAO governance data. "
         "Combines on-chain votes (Snapshot) with off-chain forum discussions (Discourse) "
-        "to surface who voted, what they said, and who stayed silent. \n\n"
-        "**Key Stats (measured on real data):**\n"
-        "- < 1.5% of voters ever post in governance forums\n"
-        "- Median top-4 voter concentration: ~84% of total voting power\n"
-        "- 5 major DAOs covered: Arbitrum, Aave, Optimism, Uniswap, ENS\n\n"
+        "to surface who voted, what they said, and who stayed silent.\n\n"
+        "- 5 DAOs: Arbitrum, Aave, Optimism, Uniswap, ENS — every vote and every forum post "
+        "of the stored proposals\n"
+        "- Measured findings and their scope: see the project README\n\n"
         "**Architecture:** SQLite (structured data) + ChromaDB (vector store) + "
-        "Multi-provider LLM fallback (Groq → Gemini → OpenRouter → Mistral)"
+        "multi-provider LLM fallback (Groq → Gemini → OpenRouter → Mistral)"
     ),
     version="0.1.0",
     contact={
@@ -75,7 +78,7 @@ app.include_router(identity_router)
 
 @app.on_event("startup")
 def on_startup():
-    """Ensure DB schema is initialised before accepting requests."""
+    """Create / upgrade the database schema before accepting requests (db/schema.py)."""
     init_db()
     print("[OK] Database ready")
     print("[OK] API started - docs at http://127.0.0.1:8000/docs")
@@ -85,23 +88,23 @@ def on_startup():
 
 @app.get("/", tags=["Health"], summary="Health check")
 def root():
-    """Returns service status and available endpoints."""
+    """Service status and every registered endpoint. The list is read from the
+    OpenAPI schema (the same data /docs shows), so it can never go out of date."""
+    endpoints = {
+        f"{method.upper():<4} {path}": operation.get("summary", "")
+        for path, operations in app.openapi()["paths"].items()
+        for method, operation in operations.items()
+    }
     return {
         "status": "ok",
         "service": "DAO Governance Intelligence API",
         "version": "0.1.0",
-        "endpoints": {
-            "POST /chat": "Ask a natural-language governance question",
-            "GET  /daos": "List all 5 curated DAOs with stats",
-            "GET  /daos/{space_id}": "DAO detail with top proposals",
-            "GET  /proposals": "List proposals (filter by space_id, state)",
-            "GET  /proposals/{id}": "Full proposal detail",
-            "GET  /proposals/{id}/concentration": "Whale concentration analysis",
-            "GET  /sync/status": "Audit collected data dates and missing records",
-            "POST /sync/run": "Trigger automated incremental sync (proposals, votes, forum)",
-            "GET  /identities/stats": "Forum-user to wallet link coverage",
-            "GET  /identities/{username}": "Linked wallet and voting power for a forum user",
-            "POST /identities/resolve": "Run identity-linking strategies",
-        },
+        "endpoints": endpoints,
         "docs": "http://127.0.0.1:8000/docs",
     }
+
+
+# ── Where control goes next ───────────────────────────────────────────────────
+# Every request is handed to the router whose prefix matches; start reading at
+# that feature's routes.py (e.g. features/chat/routes.py for POST /chat).
+# If the path matches no router: FastAPI answers 404 itself.

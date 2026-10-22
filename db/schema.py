@@ -1,7 +1,27 @@
 # db/schema.py
 """
-SQLite schema for local dev. Swap to Postgres later by changing only the
-connection setup — table definitions here are portable standard SQL.
+db/schema.py — The database: every table, and the one way to open a connection.
+
+WHAT THIS FILE DOES
+    Defines the SQLite tables and opens connections. Every module that reads or
+    writes data gets its connection from get_connection(), which also makes sure
+    the schema is current (creates missing tables, columns and indexes, and runs
+    the one-time forum_posts key migration).
+
+THE TABLES
+    spaces               one row per DAO (Snapshot "space")      <- features/proposals/fetch.py
+    proposals            one row per proposal                    <- features/proposals/fetch.py
+    votes                one row per (proposal, voter)           <- features/votes/fetch.py
+    forum_posts          one row per (proposal, forum post)      <- features/forum/fetch.py
+    forum_threads        what Discourse listed per thread         <- features/forum/fetch.py
+    resolved_identities  forum username -> wallet link            <- features/identity/
+    wallet_ens           cached, verified wallet -> ENS names     <- features/identity/strategies/voter_ens.py
+
+WHERE IT SITS
+    Used by everything that touches data. The file itself is db/dao_intelligence.db
+    (not in git; rebuild it with the sync commands in the README).
+    Table definitions are standard SQL, so moving to Postgres later mostly means
+    changing get_connection().
 """
 
 import sqlite3
@@ -98,13 +118,6 @@ CREATE TABLE IF NOT EXISTS wallet_ens (
     checked_at       TEXT
 );
 
-CREATE TABLE IF NOT EXISTS proposal_polling_state (
-    proposal_id               TEXT PRIMARY KEY REFERENCES proposals(id),
-    is_active                 INTEGER DEFAULT 0,   -- 0 or 1, SQLite has no real boolean type
-    last_requested_at         TEXT,                -- most recent user request, drives idle eviction
-    last_refreshed_at         TEXT,                -- most recent successful data pull
-    refresh_interval_minutes  INTEGER DEFAULT 5
-);
 
 CREATE INDEX IF NOT EXISTS idx_proposals_space ON proposals(space_id);
 CREATE INDEX IF NOT EXISTS idx_votes_proposal ON votes(proposal_id);
@@ -146,6 +159,9 @@ ADDED_COLUMNS = {
 
 
 def _add_missing_columns(conn):
+    """
+    Add any ADDED_COLUMNS an older database lacks. Called by _ensure_schema().
+    """
     for table, columns in ADDED_COLUMNS.items():
         existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         for name, sql_type in columns.items():
@@ -154,6 +170,10 @@ def _add_missing_columns(conn):
 
 
 def _ensure_schema(conn):
+    """
+    Bring a connection's database up to the current schema (safe to repeat:
+    every step checks first). Called by init_db() and get_connection().
+    """
     conn.executescript(SCHEMA)
     _add_missing_columns(conn)
     _migrate_forum_posts_key(conn)
@@ -161,6 +181,10 @@ def _ensure_schema(conn):
 
 
 def init_db():
+    """
+    Create / upgrade the schema once. Called by main.py at API startup and by
+    `python -m db.schema`.
+    """
     conn = sqlite3.connect(DB_PATH)
     _ensure_schema(conn)
     conn.close()
@@ -168,6 +192,14 @@ def init_db():
 
 
 def get_connection():
+    """
+    An open connection to db/dao_intelligence.db with the schema up to date.
+    Rows behave like dicts: row["title"].
+
+    Who calls it: every route handler (one connection per request, closed in a
+    `finally`), every CLI entry point, and run_chat(). The CALLER closes it.
+    Tests point DB_PATH at a temporary file first (tests/conftest.py).
+    """
     conn = sqlite3.connect(DB_PATH)
     _ensure_schema(conn)
     conn.row_factory = sqlite3.Row   # lets you access columns by name, e.g. row["title"]
@@ -176,3 +208,9 @@ def get_connection():
 
 if __name__ == "__main__":
     init_db()
+
+
+# ── Where control goes next ───────────────────────────────────────────────────
+# The connection goes back to the caller, which runs its queries and closes it.
+# To add a column later: add it to the CREATE TABLE above AND to ADDED_COLUMNS,
+#   so existing databases get it too.

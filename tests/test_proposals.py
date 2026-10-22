@@ -32,6 +32,10 @@ class FakeSnapshot:
         self.requested_ids = []
 
     def __call__(self, query):
+        if "space(id:" in query:
+            space = re.search(r'space\(id: "([^"]+)"', query).group(1)
+            return {"space": {"id": space, "name": "Test DAO", "about": "", "network": "1",
+                              "proposalsCount": len(self.proposals), "followersCount": 7, "votesCount": 9}}
         first = int(re.search(r"first: (\d+)", query).group(1))
         if "id_in" in query:
             ids = re.findall(r'"([^"]+)"', re.search(r"id_in: \[(.*?)\]", query).group(1))
@@ -159,6 +163,16 @@ def test_nothing_new_means_nothing_written(db, snap):
     store(db, make("p", created=1_000))
     snap([make("p", created=1_000)])
     assert proposal_fetch.sync_proposals(db)["new"]["added"] == 0
+
+
+def test_sync_stores_the_dao_row_that_the_dao_endpoints_read(db, snap):
+    snap([make("p", created=1_000)])
+
+    result = proposal_fetch.sync_proposals(db)
+
+    space = db.execute("SELECT * FROM spaces WHERE id = ?", (SPACE,)).fetchone()
+    assert (space["name"], space["proposals_count"], space["followers_count"]) == ("Test DAO", 1, 7)
+    assert result["spaces"] == {"refreshed": 1, "failed": []}
 
 
 # ── older databases ──────────────────────────────────────────────────────────

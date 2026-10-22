@@ -1,6 +1,6 @@
 # features/identity/strategies/self_disclosed.py
 """
-A wallet address that the author says, in their own post, is theirs.
+features/identity/strategies/self_disclosed.py — A wallet the author says, in their own post, is theirs.
 
 Most addresses in forum posts are NOT the author's voting wallet. When we
 checked our data they were mostly grant payout addresses ("L2 recipient
@@ -19,6 +19,10 @@ Rules:
     wallet actually voted in the user's DAO
   * each run recomputes everything and removes self_disclosed links that no
     longer pass, so tightening a rule also cleans up old data
+
+WHERE IT SITS
+    features/identity/runner.py resolve_all() and rescore() (--upgrade)
+        --> THIS FILE --> common.upsert_identity    (no network)
 """
 
 import re
@@ -42,7 +46,12 @@ NOT_PERSONAL = re.compile(r"recipient|payout|contract|multisig|\bsafe\b|treasury
 
 
 def claimed_addresses(text: str) -> list[str]:
-    """Addresses in `text` that the author claims as their own."""
+    """
+    Addresses in `text` that the author claims as their own.
+
+    Parameter (where it comes from):
+        text - one forum post's content, from find_self_disclosed below.
+    """
     found = []
     for m in WALLET_RE.finditer(text):
         before = text[max(0, m.start() - CONTEXT_CHARS):m.start()]
@@ -52,7 +61,12 @@ def claimed_addresses(text: str) -> list[str]:
 
 
 def find_self_disclosed(conn) -> dict[str, str]:
-    """{username: wallet} for users who claim exactly one address across their posts."""
+    """
+    {username: wallet} for users who claim exactly one address across their posts.
+
+    Parameter (where it comes from):
+        conn - passed down from link_self_disclosed.
+    """
     claims: dict[str, dict[str, str]] = {}   # username -> {lower-case wallet: wallet as written}
     for post in conn.execute("SELECT lower(username) AS username, content FROM forum_posts"):
         for wallet in claimed_addresses(post["content"] or ""):
@@ -62,6 +76,13 @@ def find_self_disclosed(conn) -> dict[str, str]:
 
 
 def link_self_disclosed(conn) -> dict:
+    """
+    Remove self_disclosed links the rules no longer support, then add the valid ones.
+    Returns {"strategy", "candidates", "linked", "removed"}.
+
+    Parameter (where it comes from):
+        conn - passed by features/identity/runner.py resolve_all() / rescore().
+    """
     valid = find_self_disclosed(conn)
 
     # 1. Remove old self_disclosed links that the current rules no longer support.
@@ -85,3 +106,8 @@ def link_self_disclosed(conn) -> dict:
                  for user, wallet in valid.items())
     conn.commit()
     return {"strategy": "self_disclosed", "candidates": len(valid), "linked": linked, "removed": removed}
+
+
+# ── Where control goes next ───────────────────────────────────────────────────
+# Back to features/identity/runner.py, which runs strategies/upgrade.py next: a low
+#   self-disclosed link becomes "high" if that wallet voted in the user's DAO.

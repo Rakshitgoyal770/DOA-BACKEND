@@ -11,6 +11,9 @@ repository. It covers the two primary paths:
 ## Project structure
 
 One folder per feature; each feature keeps its HTTP routes, logic and fetching together.
+Every file starts with a header (what it does, where it sits, its inputs), every
+function says where its parameters come from, and every file ends with a
+"Where control goes next" section.
 
 ```
 main.py                    app creation + router registration only
@@ -18,16 +21,19 @@ config/                    curated DAO list
 db/                        schema + connection (dao_intelligence.db lives here)
 clients/                   external APIs only: snapshot.py, discourse.py, ens.py
 features/
-  proposals/               routes.py (API)  fetch.py (pull from Snapshot)
-  votes/                   fetch.py (capped + full cursor-paged fetch)
-  forum/                   fetch.py (Discourse posts)
-  daos/                    routes.py
+  metrics.py               every governance number, defined once (silence ratio,
+                           winning share, top-voter share, choice names)
+  proposals/               routes.py (API)  service.py (queries)  fetch.py (Snapshot sync)
+  votes/                   fetch.py (complete cursor-paged fetch)  completeness.py (the rule)
+  forum/                   fetch.py (every post of each thread)  completeness.py (the rule)
+  daos/                    routes.py  service.py
   sync/                    routes.py  audit.py  runner.py (CLI: python -m features.sync.runner)
   identity/                routes.py  runner.py  stats.py  common.py  strategies/*
-  chat/                    routes.py  retrieval.py  context.py  prompt.py  service.py  llm.py
-vector/                    chunking.py  embedding.py (ChromaDB index)
-eval/                      RAG evaluation harness
-scripts/                   manual one-off checks
+  chat/                    routes.py  service.py (run_chat: the pipeline)  retrieval.py
+                           context.py  prompt.py  llm.py
+vector/                    chunking.py  embedding.py (ChromaDB index, incremental)
+eval/                      RAG evaluation harness (uses run_chat, like the API)
+tests/                     offline tests + regression checks on the real database
 ```
 
 ## System-level flow
@@ -145,7 +151,7 @@ erDiagram
     proposals ||--o{ votes : receives
     proposals ||--o{ forum_posts : discusses
     forum_posts }o--o| resolved_identities : "username resolves to"
-    proposals ||--o| proposal_polling_state : tracks
+    proposals ||--o| forum_threads : "thread listed by Discourse"
 
     spaces {
         text id PK

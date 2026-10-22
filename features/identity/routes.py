@@ -1,8 +1,25 @@
 # features/identity/routes.py
 """
-Identity linking endpoints for the frontend: forum-user -> wallet links with
-confidence, per-proposal participants (who spoke, who voted, who is linked),
-coverage stats, and a trigger to run the linking strategies.
+features/identity/routes.py — The /identities HTTP endpoints (forum user <-> wallet links).
+
+WHAT THIS FILE DOES
+    GET  /identities/stats                    coverage: how many forum users / posts are linked
+    GET  /identities                          list + search links (?q=, ?min_confidence=, ?method=)
+    GET  /identities/proposal/{proposal_id}   every forum poster of a proposal, with wallet,
+                                              confidence, voting power and choice
+    GET  /identities/wallet/{wallet_address}  reverse lookup: which forum user(s) own a wallet
+    GET  /identities/{username}               one user's link, ENS name, posts, votes
+    POST /identities/resolve                  run all linking strategies in the background
+    GET  /identities/resolve/status           progress of that background run
+
+WHERE IT SITS
+    client --HTTP--> main.py --> THIS FILE --> SQLite (reads)
+                                           --> features/identity/runner.py (POST /resolve)
+    Choice names come from features/metrics.py, ENS names from features/identity/common.py,
+    so they match the proposal endpoints and the chat.
+
+INPUTS
+    Path and query parameters of each request (shown at /docs).
 """
 
 import json
@@ -11,18 +28,26 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
 from db.schema import get_connection
-from features.identity.common import CONFIDENCE_RANK
+from features.identity.common import CONFIDENCE_RANK, verified_ens_name
 from features.identity.runner import resolve_all
 from features.identity.stats import identity_stats
+from features.metrics import decode_choice
 
 router = APIRouter(prefix="/identities", tags=["Identity Linking"])
 
-# State of the last background resolution run, shown by GET /identities/resolve/status
+# State of the last background resolution run, shown by GET /identities/resolve/status.
+# Kept in memory: it resets when the server restarts.
 _run_state: dict = {"status": "idle", "started_at": None, "finished_at": None, "result": None, "error": None}
 
 
 def _min_rank_clause(min_confidence: str | None) -> tuple[str, list]:
-    """SQL fragment keeping links at or above `min_confidence`."""
+    """
+    SQL condition keeping links at or above `min_confidence`, plus its parameters.
+
+    Parameter (where it comes from):
+        min_confidence - ?min_confidence= of GET /identities (low | medium | high | certain).
+    Raises HTTP 422 for an unknown level.
+    """
     if not min_confidence:
         return "", []
     if min_confidence not in CONFIDENCE_RANK:
@@ -31,10 +56,25 @@ def _min_rank_clause(min_confidence: str | None) -> tuple[str, list]:
     return f"r.confidence_level IN ({','.join('?' * len(allowed))})", allowed
 
 
+def _choices_by_proposal(conn, proposal_ids) -> dict[str, list]:
+    """
+    {proposal_id: its choice names}, so a vote's choice numbers can be named.
+
+    Parameters (where they come from):
+        conn         - opened by the endpoint.
+        proposal_ids - the proposals of the votes being shown.
+    """
+    ids = list(set(proposal_ids))
+    if not ids:
+        return {}
+    rows = conn.execute(f"SELECT id, choices_json FROM proposals WHERE id IN ({','.join('?' * len(ids))})", ids)
+    return {r["id"]: json.loads(r["choices_json"]) if r["choices_json"] else [] for r in rows}
+
+
 @router.get("/stats", summary="Coverage of forum-user -> wallet links")
 def get_identity_stats():
     """Users and posts linked, medium-or-better share, posts carrying voting power,
-    plus breakdowns by method and confidence. Use for a coverage widget."""
+    plus breakdowns by method, confidence and DAO. Use for a coverage widget."""
     conn = get_connection()
     try:
         stats = identity_stats(conn)
@@ -65,6 +105,7 @@ def list_identities(
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
+    """Paged list of links, newest first, each with its ENS name and post count."""
     clauses, params = [], []
     conf_sql, conf_params = _min_rank_clause(min_confidence)
     if conf_sql:
@@ -105,16 +146,17 @@ def list_identities(
 
 @router.get("/proposal/{proposal_id}", summary="Forum participants of a proposal with wallet, confidence and voting power")
 def proposal_participants(proposal_id: str):
-    """Everyone who posted on a proposal's forum thread: their post count, linked wallet
-    and confidence (null if unlinked), and the voting power and choice if that wallet voted.
+    """Everyone who posted on a proposal's forum thread: post count, linked wallet and
+    confidence (null if unlinked), and the voting power and choice if that wallet voted.
     Also returns the share of forum posters we could identify."""
     conn = get_connection()
     try:
         prop = conn.execute(
-            "SELECT id, title, space_id, votes_count FROM proposals WHERE id = ?", (proposal_id,)
+            "SELECT id, title, space_id, votes_count, choices_json FROM proposals WHERE id = ?", (proposal_id,)
         ).fetchone()
         if not prop:
             raise HTTPException(status_code=404, detail="Proposal not found")
+        choices = json.loads(prop["choices_json"]) if prop["choices_json"] else []
         rows = conn.execute(
             """
             SELECT lower(f.username) AS username, COUNT(*) AS posts,
@@ -133,8 +175,7 @@ def proposal_participants(proposal_id: str):
         participants = []
         for r in rows:
             d = dict(r)
-            raw_choice = d.pop("choice_json", None)
-            d["choice"] = json.loads(raw_choice) if raw_choice else None
+            d["choice"] = decode_choice(d.pop("choice_json"), choices)
             participants.append(d)
         linked = sum(1 for p in participants if p["wallet_address"])
         voted = sum(1 for p in participants if p["voting_power"] is not None)
@@ -155,18 +196,15 @@ def proposal_participants(proposal_id: str):
 
 @router.get("/wallet/{wallet_address}", summary="Reverse lookup: forum user(s) for a wallet")
 def wallet_identity(wallet_address: str):
-    """Which forum username (if any) is linked to this wallet, with its cached ENS name."""
+    """Which forum username (if any) is linked to this wallet, with its verified ENS name."""
     conn = get_connection()
     try:
         rows = conn.execute(
             "SELECT * FROM resolved_identities WHERE lower(wallet_address) = ?", (wallet_address.lower(),)
         ).fetchall()
-        ens = conn.execute(
-            "SELECT ens_name, verified FROM wallet_ens WHERE lower(wallet_address) = ?", (wallet_address.lower(),)
-        ).fetchone()
         return {
             "wallet_address": wallet_address,
-            "ens_name": ens["ens_name"] if ens and ens["verified"] else None,
+            "ens_name": verified_ens_name(conn, wallet_address),
             "forum_users": [dict(r) for r in rows],
         }
     finally:
@@ -175,10 +213,17 @@ def wallet_identity(wallet_address: str):
 
 @router.get("/resolve/status", summary="Status of the last resolution run")
 def resolution_status():
+    """idle / running / done / failed, with timestamps and the run's result or error."""
     return _run_state
 
 
 def _run_resolution(profile_limit: int, voter_wallets: int):
+    """
+    The background job started by POST /identities/resolve. Opens its own
+    connection (the request's has closed by the time this runs).
+
+    Parameters (where they come from): ?profile_limit= and ?voter_wallets= of that request.
+    """
     _run_state.update(status="running", started_at=datetime.now(timezone.utc).isoformat(),
                       finished_at=None, result=None, error=None)
     conn = get_connection()
@@ -207,7 +252,8 @@ def run_resolution(
 
 @router.get("/{username}", summary="Wallet link and voting history for one forum user")
 def get_identity(username: str):
-    """The resolved wallet for a forum username, its ENS name, post count, and voting power per proposal."""
+    """The linked wallet for a forum username, its ENS name, post count, and its
+    25 largest votes (voting power and choice names)."""
     conn = get_connection()
     try:
         ident = conn.execute(
@@ -215,10 +261,6 @@ def get_identity(username: str):
         ).fetchone()
         if not ident:
             raise HTTPException(status_code=404, detail=f"No wallet linked to '{username}'")
-        ens = conn.execute(
-            "SELECT ens_name FROM wallet_ens WHERE lower(wallet_address) = ? AND verified = 1",
-            (ident["wallet_address"].lower(),),
-        ).fetchone()
         posts = conn.execute(
             "SELECT COUNT(*) FROM forum_posts WHERE lower(username) = ?", (username.lower(),)
         ).fetchone()[0]
@@ -230,11 +272,25 @@ def get_identity(username: str):
             """,
             (ident["wallet_address"].lower(),),
         ).fetchall()
+        choices = _choices_by_proposal(conn, [v["proposal_id"] for v in votes])
         return {
             **dict(ident),
-            "ens_name": ens["ens_name"] if ens else None,
+            "ens_name": verified_ens_name(conn, ident["wallet_address"]),
             "post_count": posts,
-            "votes": [dict(v) for v in votes],
+            "votes": [
+                {"proposal_id": v["proposal_id"], "title": v["title"], "vp": v["vp"],
+                 "choice": decode_choice(v["choice_json"], choices.get(v["proposal_id"], []))}
+                for v in votes
+            ],
         }
     finally:
         conn.close()
+
+
+# ── Where control goes next ───────────────────────────────────────────────────
+# Each GET returns JSON and the request ends. POST /identities/resolve returns at
+# once; the work continues in features/identity/runner.py resolve_all() and its
+# result appears in GET /identities/resolve/status.
+# If the username / proposal is unknown: HTTP 404. If a run is already going: HTTP 409.
+# Links made by a run are visible to the chat immediately (features/chat/context.py
+#   reads them live); the search index picks them up on the next python -m vector.embedding.
