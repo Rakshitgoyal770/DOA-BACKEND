@@ -117,13 +117,25 @@ The API is served with FastAPI at `http://127.0.0.1:8000`. Interactive documenta
 
 | Method | Endpoint | Query / Body Params | Description |
 |:---|:---|:---|:---|
-| `GET` | `/` | None | Service health status and registered route overview. |
-| `GET` | `/daos` | None | Summary of all 5 DAOs with silence ratio, forum coverage, and proposal counts. |
-| `GET` | `/daos/{space_id}` | `space_id` (path) | Detail for a single DAO including its top proposals by participation. |
-| `GET` | `/proposals` | `space_id`, `min_votes`, `limit`, `offset` | Filterable proposal list with voting metadata and discussion links. |
-| `GET` | `/proposals/{id}` | `proposal_id` (path) | Proposal detail, body text, choices, total votes, and forum thread. |
-| `GET` | `/proposals/{id}/concentration` | `top_n=4` (query) | Computes whale voter dominance (Top-N share % and voter wallet breakdown). |
-| `POST` | `/chat` | `{"query": str, "proposal_id": opt, "n_results": 5}` | Natural-language Q&A with source chunk citations and fallback provider info. |
+| `GET` | `/` | None | Service status and every registered endpoint (generated from the API schema). |
+| `GET` | `/daos` | None | All 5 DAOs with forum coverage, average silence ratio and average winning-choice share. |
+| `GET` | `/daos/{space_id}` | `space_id` (path) | One DAO with its 5 most-voted proposals. |
+| `GET` | `/proposals` | `space_id`, `state`, `limit` (1-100), `skip` | Filterable proposal list with silence ratio and winning share. |
+| `GET` | `/proposals/{id}` | `proposal_id` (path) | Proposal detail: body preview, choices, scores, stored vote count. |
+| `GET` | `/proposals/{id}/concentration` | `top_n` (1-50, default 4) | Whale report: top-N wallets, their share of voting power and their choices (as names). |
+| `POST` | `/chat` | `{"query": str, "proposal_id": opt, "n_results": 5}` | Q&A with cited sources, the SQL facts used, and which LLM answered. |
+| `GET` | `/sync/status` | None | What data is stored, how fresh it is, and vote / forum completeness. |
+| `POST` | `/sync/run` | `limit` (1-50, default 10) | Run the sync now: proposals, forum threads, votes. |
+| `GET` | `/identities/stats` | None | How many forum users and posts are linked to wallets. |
+| `GET` | `/identities` | `q`, `min_confidence`, `method`, `limit`, `offset` | Search forum-user → wallet links. |
+| `GET` | `/identities/proposal/{id}` | `proposal_id` (path) | Every forum poster of a proposal with wallet, confidence, voting power and choice. |
+| `GET` | `/identities/wallet/{address}` | `wallet_address` (path) | Which forum user(s) a wallet belongs to. |
+| `GET` | `/identities/{username}` | `username` (path) | One user's wallet, ENS name, post count and largest votes. |
+| `POST` | `/identities/resolve` | `profile_limit`, `voter_wallets` | Run all wallet-linking strategies in the background. |
+| `GET` | `/identities/resolve/status` | None | Progress of that background run. |
+
+Vote choices are always returned as **names** (`"For"`, ranked `["Against", "For"]`,
+weighted `{"For": 2}`), never as Snapshot's raw numbers.
 
 ### Sample `POST /chat` Payload & Response
 
@@ -179,7 +191,62 @@ curl -X POST "http://127.0.0.1:8000/chat" \
 
 ---
 
-## 7. Quickstart & Installation
+## 7. Code Guide
+
+### How the code is organised
+One folder per feature; inside it, `routes.py` is the HTTP layer, `service.py` the
+queries, `fetch.py` the download from outside services, and `completeness.py` the
+"do we have everything?" rule. A file-by-file map is in [`DATA_FLOW.md`](./DATA_FLOW.md).
+
+```
+main.py            creates the API and registers one router per feature
+config/            the DAOs we follow
+db/schema.py       every table, and get_connection() (the only way to open the database)
+clients/           the only code that talks to the internet: Snapshot, Discourse, ENS
+features/
+  metrics.py       every governance number, defined once
+  proposals/ votes/ forum/ daos/ sync/ identity/ chat/
+vector/            the ChromaDB search index (chunking + incremental sync)
+eval/              the evaluation harness and its golden dataset
+tests/             offline tests and regression checks on the real database
+```
+
+### How every file is documented
+So you can open any file and follow it without reading the rest of the project:
+
+- **Header** — what the file does, where it sits in the flow (who calls it, what it calls), and its inputs.
+- **Every function** — what it returns and *where each parameter comes from*
+  (e.g. "`limit` — sync_all passes 20; the CLI passes `--limit`").
+- **End of file: "Where control goes next"** — the file that usually runs next, and what
+  happens *if* something goes wrong (a failed request, an unknown id) or the file is run on its own.
+
+### One home for every rule
+Rules that several parts of the system depend on are written exactly once:
+
+| Rule | Lives in | Used by |
+|:---|:---|:---|
+| Forum posters, silence ratio, winning share, top-voter share, choice names | `features/metrics.py` | DAO endpoints, proposal endpoints, chat |
+| Is a proposal's vote data complete? | `features/votes/completeness.py` | vote fetcher, audit, whale share |
+| Is a forum thread's data complete? | `features/forum/completeness.py` | forum fetcher, audit |
+| The chat pipeline (search → facts → prompt → LLM) | `features/chat/service.py` `run_chat` | `POST /chat` and the evaluation |
+| Paging through Snapshot by time | `clients/snapshot.py` `_iter_by_created` | votes and proposals |
+
+So the endpoints and the chat can never report different numbers for the same thing,
+and the evaluation always measures the pipeline users actually get.
+
+### Suggested reading order
+Follow each file's "Where control goes next" section:
+
+1. **A chat request** — `main.py` → `features/chat/routes.py` → `service.py` → `retrieval.py`
+   → `context.py` → `features/metrics.py` → `prompt.py` → `llm.py`
+2. **Keeping the data fresh** — `features/sync/runner.py` → `proposals/fetch.py`
+   → `forum/fetch.py` → `votes/fetch.py` → `sync/audit.py`
+3. **Linking forum users to wallets** — `features/identity/runner.py` → `strategies/*.py` → `common.py`
+4. **The search index** — `vector/embedding.py` → `vector/chunking.py`
+
+---
+
+## 8. Quickstart & Installation
 
 ### Prerequisites
 * Python 3.11+
@@ -234,10 +301,24 @@ pins verified values from the real database and is skipped when it is absent.
 ```bash
 python -m eval.eval_harness
 ```
+The harness runs the same `run_chat` pipeline as `POST /chat`, so it is ready for Phase 2: measuring the chat quality baseline.
+
+### Reading the Code
+Every file starts with what it does and where it sits, and ends with a "Where control goes next" section. Follow those notes in this order to trace one request from start to finish:
+
+```
+main.py → features/chat/routes.py → service.py → retrieval.py → context.py → metrics.py → prompt.py → llm.py
+```
+
+Then the data side:
+
+```
+features/sync/runner.py → proposals/fetch.py → forum/fetch.py → votes/fetch.py
+```
 
 ---
 
-## 8. SDE Resume Bullet Points
+## 9. SDE Resume Bullet Points
 
 You can copy and adapt these bullet points directly for software engineering and backend roles:
 
