@@ -112,8 +112,10 @@ flowchart TD
 - [`features/proposals/fetch.py`](./features/proposals/fetch.py), [`features/forum/fetch.py`](./features/forum/fetch.py),
   [`features/votes/fetch.py`](./features/votes/fetch.py), [`features/sync/audit.py`](./features/sync/audit.py),
   [`features/sync/runner.py`](./features/sync/runner.py)
-  - `fetch_new_proposals()` gets current proposals for every curated DAO and
-    upserts proposal state, scores, and counts.
+  - `sync_proposals()` ([`features/proposals/fetch.py`](./features/proposals/fetch.py))
+    re-reads every unfinished proposal (active, or scores not final) by id,
+    then adds every proposal published since the newest one stored, paging
+    by creation time. A row is rewritten only when a field changed.
   - `fetch_forum_threads()` ([`features/forum/fetch.py`](./features/forum/fetch.py))
     fetches every post of each linked thread (Discourse's first page holds only
     20; the rest are requested by id), stores posts once per proposal linking

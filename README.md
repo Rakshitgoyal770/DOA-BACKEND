@@ -24,7 +24,9 @@ Decentralized governance suffers from a fundamental information asymmetry:
 
 ## 2. Key Empirical Findings (Proven on Real Data)
 
-This system was tested against live data from **5 major DAOs** (Optimism, Arbitrum, Aave, Uniswap, ENS) covering **117 proposals**, **515,000+ on-chain votes** and **2,300+ forum posts** (every vote and every post of each linked thread fetched, not a sample):
+This system was tested against live data from **5 major DAOs** (Optimism, Arbitrum, Aave, Uniswap, ENS) covering **118 proposals**, **515,000+ on-chain votes** and **2,300+ forum posts** (every vote and every post of each linked thread fetched, not a sample):
+
+> **Scope:** these are the most recent ~20–30 proposals per DAO (118 of the 1,803 these spaces have on Snapshot), each with every vote and every forum post. Optimism's figures cover Nov 2022 – Jan 2023 because that is when Optimism last used Snapshot; its later votes happen elsewhere.
 
 ### 📊 The "Silence Gap" (Voters vs. Forum Deliberators)
 Across the dataset there are **472 distinct forum participants** against **86,445 distinct voting wallets** — about **0.55%**, fewer than **1%** (an upper bound, since one person can hold several wallets):
@@ -240,7 +242,7 @@ python -m eval.eval_harness
 You can copy and adapt these bullet points directly for software engineering and backend roles:
 
 * **Backend / Distributed Systems:**
-  > *“Engineered a production-ready governance intelligence backend using FastAPI, SQLite, and ChromaDB, ingesting 117 proposals and 515,000+ votes across 5 DAOs from Snapshot GraphQL and Discourse APIs.”*
+  > *“Engineered a production-ready governance intelligence backend using FastAPI, SQLite, and ChromaDB, ingesting 118 proposals and 515,000+ votes across 5 DAOs from Snapshot GraphQL and Discourse APIs.”*
 
 * **Machine Learning / RAG:**
   > *“Architected an evaluated RAG pipeline with dense vector indexing (BAAI/bge-small-en-v1.5) and a 4-tier resilient LLM fallback router (Groq &rarr; Gemini &rarr; OpenRouter &rarr; Mistral) with automatic 429 backoff handling.”*
