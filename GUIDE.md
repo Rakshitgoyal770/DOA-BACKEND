@@ -192,6 +192,7 @@ spaces ─< proposals ─< votes (voter wallet)
 | **Distance** | How far a chunk's meaning is from the question; lower is closer; kept if ≤ 0.7 |
 | **RAG** | Retrieval-Augmented Generation: find relevant text first, then let the LLM answer from it |
 | **Facts block** | The SQL numbers written into the prompt above the sources |
+| **[Background]** | Marks a sentence the model wrote from its own general knowledge (allowed for concepts, never for numbers, results or who voted). Excluded from the faithfulness score; tracked as *background share* |
 | **Link confidence** | How sure a wallet ↔ username link is: low · medium · high (wallet voted in that DAO) · certain (hand-verified) |
 | **Complete / partial / missing** | Whether we store all, some or none of what the source says exists |
 | **Idempotent** | Running it twice gives the same result as once (no duplicates) |

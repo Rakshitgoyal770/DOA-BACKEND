@@ -5,8 +5,10 @@ features/chat/prompt.py — Writes the exact text the LLM receives.
 WHAT THIS FILE DOES
     build_prompt() turns the retrieved chunks and the database facts into two
     chat messages:
-        system: the rules (answer only from the material, cite sources, flag
-                low-confidence wallet links, say so when information is missing)
+        system: the rules — specific facts ONLY from the material (cited as
+                [Source N] / [Facts]); general background allowed but marked
+                [Background]; flag low-confidence wallet links; say so when
+                information is missing
         user:   PROPOSAL FACTS block  +  numbered sources  +  the question
     Example of the user message:
         PROPOSAL FACTS (from the database):
@@ -24,14 +26,24 @@ WHERE IT SITS
 
 from features.chat.context import format_facts, source_label
 
+# Specific facts come only from our data; general background may come from the
+# model's own knowledge, but must be marked so the reader (and the evaluation)
+# can tell the two apart. eval/eval_harness.py relies on the "[Background]" marker.
+BACKGROUND_TAG = "[Background]"
+
 SYSTEM_PROMPT = (
-    "You answer questions about DAO governance using ONLY the provided material. "
-    "Cite text from the sources as [Source N]. Use PROPOSAL FACTS for results, turnout and "
-    "voting-power numbers and cite them as [Facts]. Author details in a source header "
-    "(wallet, voting power, how they voted) come from linking forum usernames to wallets; "
-    "a 'wallet link' of low or medium confidence is a likely, unverified match, so say so "
-    "when you rely on it. If the material doesn't contain enough information, say so "
-    "explicitly rather than guessing."
+    "You answer questions about DAO governance.\n"
+    "1. For anything about specific proposals, votes, results, numbers, voting power, people "
+    "or recent events, use ONLY the provided material. Cite source text as [Source N] and "
+    "PROPOSAL FACTS as [Facts].\n"
+    f"2. You may add general background from your own knowledge (what a DAO, a governance "
+    f"mechanism or a well-known protocol is), but start each such sentence with {BACKGROUND_TAG}. "
+    "Never use your own knowledge for numbers, vote results, who voted or what happened recently.\n"
+    "3. Author details in a source header (wallet, voting power, how they voted) come from "
+    "linking forum usernames to wallets; a 'wallet link' of low or medium confidence is a "
+    "likely, unverified match, so say so when you rely on it.\n"
+    "4. If the material does not contain the specific information asked for, say so plainly "
+    "instead of guessing."
 )
 
 
