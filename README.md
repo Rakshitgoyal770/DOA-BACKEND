@@ -193,6 +193,10 @@ curl -X POST "http://127.0.0.1:8000/chat" \
 
 ## 7. Code Guide
 
+> **New here? Start with [`GUIDE.md`](./GUIDE.md)** — a one-read map: one chat question
+> followed file by file, how data gets in, where every rule lives, the tables, commands,
+> and "where do I change…?".
+
 ### How the code is organised
 One folder per feature; inside it, `routes.py` is the HTTP layer, `service.py` the
 queries, `fetch.py` the download from outside services, and `completeness.py` the
