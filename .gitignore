@@ -38,3 +38,6 @@ build/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Saved evaluation runs (generated output)
+eval/results/

@@ -158,7 +158,17 @@ spaces ─< proposals ─< votes (voter wallet)
 | Update the search index | `python -m vector.embedding` (add `--dry-run` to preview) |
 | Check my LLM keys work | `python -m features.chat.llm` |
 | Run the tests | `python -m pytest` |
-| Measure answer quality (LLM calls) | `python -m eval.eval_harness` |
+| Refresh the generated golden questions (after a sync) | `python -m eval.build_golden` |
+| Run the golden dataset: pass/fail per question type (LLM calls) | `python -m eval.eval_harness` |
+| …only some cases | `python -m eval.eval_harness --only proposal` (a level, type, or case id) |
+| …plus faithfulness / relevancy scores (3x more LLM calls) | `python -m eval.eval_harness --judge` |
+| Re-score a saved run with updated checks (no LLM calls) | `python -m eval.eval_harness --regrade eval/results/run_<date>.json` |
+
+**Which Python?** The project has its own `.venv`, which has `groq` and `mistralai`; the global Python
+does not, so every LLM call falls through to the slow free OpenRouter models (and a missing provider
+can end a run with "All providers failed"). Run the evaluation and the API with the `.venv` interpreter
+(`.venv\Scripts\python -m eval.eval_harness`, or activate it first). A case that ends in an **ERROR** is a
+provider problem, not a wrong answer: the report keeps errors out of the pass rate.
 
 ---
 

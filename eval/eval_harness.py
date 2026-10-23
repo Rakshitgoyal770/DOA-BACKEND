@@ -1,38 +1,62 @@
 # eval/eval_harness.py
 """
-eval/eval_harness.py — Measures how good the chat's answers are.
+eval/eval_harness.py — Runs the golden dataset and reports which question types pass.
 
 WHAT THIS FILE DOES
     For every case in eval/golden_dataset.py it runs the REAL chat pipeline
-    (features/chat/service.py run_chat — the same function POST /chat uses, so
-    the SQL facts and author labels are included) and scores:
-        context precision  share of retrieved documents that are expected ones
-        context recall     share of expected documents that were retrieved
-        faithfulness       LLM judge: are the answer's claims supported by the sources
-                           and the PROPOSAL FACTS? Sentences marked [Background]
-                           (allowed general knowledge) are left out of this score.
-        background share   share of sentences marked [Background] (exact). If it
-                           grows, answers lean on the model's memory instead of our data.
-        answer relevancy   LLM judge: does the answer address the question?
-    Precision, recall and background share are exact; the judged scores depend on the judge model.
+    (features/chat/service.py run_chat — the same function POST /chat uses) and
+    grades the answer with eval/checks.py:
+        exact      numbers, names, retrieved sources, [Background] tag
+        judged     advice / unanswerable / ambiguous behaviour (one YES/NO question)
+    and prints a pass/fail table per question type (level / intent), with the
+    reason for every failure. Results are saved to eval/results/ so runs can be compared.
+
+    ERRORS ARE NOT FAILURES. If no LLM provider could answer (a missing package, an
+    exhausted free-tier quota), the case is counted as an ERROR and left out of the
+    pass rate, so an infrastructure problem can never look like a wrong answer.
+
+    With --judge it also computes the LLM-judged quality scores:
+        faithfulness       are the answer's claims supported by the sources and the
+                           PROPOSAL FACTS? ([Background] sentences are left out)
+        answer relevancy   does the answer address the question?
+    plus the exact "background share" (sentences marked [Background]).
 
 RUN
-    python -m eval.eval_harness        (makes LLM calls: one answer + two judgements per case)
+    python -m eval.eval_harness                     all cases, exact checks (+ behaviour judge)
+    python -m eval.eval_harness --only proposal     cases whose id/level/intent contains "proposal"
+    python -m eval.eval_harness --judge             also faithfulness + relevancy (3 more LLM calls a case)
+    python -m eval.eval_harness --regrade eval/results/run_X.json
+                                                    re-score a saved run with the CURRENT checks and
+                                                    dataset. Reuses the saved answers and behaviour
+                                                    verdicts: zero LLM calls, so no quota.
+    Run it with the project's own interpreter (.venv), which has groq / mistralai installed.
+    Each case makes 1 LLM call for the answer (+1 for judged behaviours). Free tiers
+    rate-limit, so cases are spaced by --pause seconds (default 2).
 
 WHERE IT SITS
     THIS FILE --> features/chat/service.py run_chat (answers)
+              --> eval/checks.py grade              (pass / fail)
               --> features/chat/llm.py generate      (the judge)
-              --> eval/golden_dataset.py             (questions and expected documents)
+              --> eval/golden_dataset.py             (the cases)
 """
 
+import argparse
+import datetime
+import json
 import re
 import sys
+import time
+from collections import defaultdict
+from pathlib import Path
 
+from eval.checks import grade
 from eval.golden_dataset import GOLDEN_DATASET
 from features.chat.context import format_facts
 from features.chat.llm import generate
 from features.chat.prompt import BACKGROUND_TAG
 from features.chat.service import run_chat
+
+RESULTS_DIR = Path(__file__).with_name("results")
 
 if sys.platform == "win32":          # print non-ASCII answers on the Windows console
     try:
@@ -41,28 +65,7 @@ if sys.platform == "win32":          # print non-ASCII answers on the Windows co
         pass
 
 
-def score_context_precision(retrieved_ids: list[str], ground_truth_ids: list[str]) -> float:
-    """
-    Share of retrieved documents that are expected ones (0-1).
-
-    Parameters (where they come from — run_eval):
-        retrieved_ids    - ids of run_chat()'s chunks.
-        ground_truth_ids - the case's ground_truth_context_ids.
-    """
-    if not retrieved_ids:
-        return 0.0
-    return sum(1 for cid in retrieved_ids if cid in ground_truth_ids) / len(retrieved_ids)
-
-
-def score_context_recall(retrieved_ids: list[str], ground_truth_ids: list[str]) -> float:
-    """
-    Share of expected documents that were retrieved (0-1). Same parameters as
-    score_context_precision.
-    """
-    if not ground_truth_ids:
-        return 1.0
-    return sum(1 for cid in ground_truth_ids if cid in retrieved_ids) / len(ground_truth_ids)
-
+# ── LLM-judged quality scores (--judge) ───────────────────────────────────────
 
 def _judge(instruction: str) -> tuple[float | None, str]:
     """
@@ -131,59 +134,170 @@ def score_answer_relevancy(question: str, answer: str) -> tuple[float | None, st
                   f"Question: {question}\n\nAnswer: {answer}")
 
 
-def _average(values: list) -> float:
-    valid = [v for v in values if v is not None]
-    return sum(valid) / len(valid) if valid else 0.0
+# ── Running the cases ─────────────────────────────────────────────────────────
+
+def run_case(case: dict, judge: bool) -> dict:
+    """
+    Answer one case with the real pipeline and grade it.
+
+    Parameters (where they come from — run_eval):
+        case  - one GOLDEN_DATASET entry.
+        judge - the --judge flag.
+    Only scope["proposal_id"] is passed on: run_chat has no DAO scope yet, so a
+    dao_id is ignored (those cases show what happens without it).
+    """
+    started = time.time()
+    try:
+        out = run_chat(case["question"], proposal_id=case["scope"].get("proposal_id"))
+    except Exception as e:                       # every LLM provider failed, etc.
+        return {"id": case["id"], "question": case["question"], "passed": False, "error": True,
+                "failures": [f"error: {e}"[:200]], "recall": 0.0,
+                "answer": None, "provider": None, "seconds": round(time.time() - started, 1)}
+
+    retrieved = [c["id"] for c in out["chunks"]]
+    result = {"id": case["id"], "question": case["question"], **grade(case, out["answer"], retrieved),
+              "answer": out["answer"], "provider": out["provider"], "retrieved": retrieved}
+    if judge and out["answer"]:
+        result["faithfulness"], _ = score_faithfulness(out["answer"], [c["document"] for c in out["chunks"]], out["facts"])
+        result["relevancy"], _ = score_answer_relevancy(case["question"], out["answer"])
+        result["background_share"] = background_share(out["answer"])
+    result["seconds"] = round(time.time() - started, 1)
+    return result
 
 
-def run_eval() -> list[dict]:
+def print_report(cases: list[dict], results: list[dict]):
     """
-    Score every golden case and print a summary. Returns one dict per scored case:
-    {question, provider, precision, recall, faithfulness, relevancy}.
+    Pass/fail per question type, then every failure with its reason.
+    Cases that ended in an ERROR (no provider could answer) are listed separately
+    and excluded from the pass rate.
+
+    Parameters (where they come from — run_eval / regrade):
+        cases   - the golden cases that were run (for level, intent and "needs").
+        results - one result dict per case.
     """
-    results = []
-    for case in GOLDEN_DATASET:
-        print(f"\n{'=' * 60}\nQuestion: {case['question']}")
-        out = run_chat(case["question"], proposal_id=case["proposal_id"])
-        if out["answer"] is None:
-            print("  No chunks retrieved — skipping generation.")
+    by_id = {c["id"]: c for c in cases}
+    groups = defaultdict(list)
+    for r in results:
+        c = by_id[r["id"]]
+        groups[(c["level"], c["intent"])].append(r)
+
+    print(f"\n{'LEVEL':<10} {'TYPE':<16} {'PASS':>6} {'ERR':>4}   NEEDS (feature not built yet)")
+    print("-" * 82)
+    for (level, intent), rs in sorted(groups.items()):
+        answered = [r for r in rs if not r.get("error")]
+        passed = sum(r["passed"] for r in answered)
+        errors = len(rs) - len(answered)
+        needs = {by_id[r["id"]]["needs"] for r in rs} - {None}
+        mark = "ok " if answered and passed == len(answered) else ("-- " if passed == 0 else "~  ")
+        mark = "?  " if not answered else mark
+        print(f"{level:<10} {intent:<16} {passed:>2}/{len(answered):<3} {errors or '':>4} {mark} {', '.join(needs)}")
+    answered = [r for r in results if not r.get("error")]
+    errors = len(results) - len(answered)
+    print("-" * 82)
+    print(f"{'PASSED':<27} {sum(r['passed'] for r in answered):>2}/{len(answered)} answered cases")
+    if errors:
+        print(f"{'ERRORS':<27} {errors} cases got no answer (provider problem, NOT counted as failures) - rerun them")
+
+    print("\nFAILURES")
+    for r in answered:
+        if not r["passed"]:
+            print(f"  {r['id']}: " + " | ".join(r["failures"]))
+    for r in results:
+        if r.get("error"):
+            print(f"  [error, not scored] {r['id']}: {r['failures'][0]}")
+
+    judged = [r for r in results if r.get("faithfulness") is not None]
+    if judged:
+        avg = lambda k: sum(r[k] for r in judged if r.get(k) is not None) / len(judged)
+        print(f"\nJUDGED ({len(judged)} answers): faithfulness {avg('faithfulness'):.2f} | "
+              f"relevancy {avg('relevancy'):.2f} | background share {avg('background_share'):.2f}")
+
+
+def regrade(path: str) -> list[dict]:
+    """
+    Re-score a saved run with the current checks and dataset, reusing its answers
+    and its earlier behaviour verdicts. Makes NO LLM calls, so it costs no quota.
+
+    Parameter (where it comes from):
+        path - the --regrade flag: a file in eval/results/ written by run_eval.
+    Cases whose question text changed since the run are skipped (their saved answer
+    belongs to a different question), as are cases no longer in the dataset.
+    """
+    saved = json.loads(Path(path).read_text(encoding="utf-8"))["results"]
+    by_id = {c["id"]: c for c in GOLDEN_DATASET}
+    results, skipped = [], []
+    for old in saved:
+        case = by_id.get(old["id"])
+        if case is None or (old.get("question") and old["question"] != case["question"]):
+            skipped.append(old["id"])
             continue
+        if old.get("error"):
+            results.append(old)
+            continue
+        # Reuse the earlier behaviour verdict (it may have cost an LLM judge call); everything
+        # else - numbers, names, sources, the [Background] tag - is recomputed.
+        earlier = [f for f in old["failures"] if f.startswith("behavior:")]
+        verdict = (not earlier, earlier[0][len("behavior: "):] if earlier else "")
+        new = {**old, "question": case["question"],
+               **grade(case, old["answer"], old.get("retrieved", []), behavior_result=verdict)}
+        results.append(new)
+    if skipped:
+        print(f"Skipped (case removed or question changed since this run - rerun them): {skipped}")
+    print_report([by_id[r["id"]] for r in results], results)
+    return results
 
-        retrieved_ids = [c["id"] for c in out["chunks"]]
-        precision = score_context_precision(retrieved_ids, case["ground_truth_context_ids"])
-        recall = score_context_recall(retrieved_ids, case["ground_truth_context_ids"])
-        faithfulness, faith_reason = score_faithfulness(
-            out["answer"], [c["document"] for c in out["chunks"]], out["facts"])
-        background = background_share(out["answer"])
-        relevancy, rel_reason = score_answer_relevancy(case["question"], out["answer"])
 
-        print(f"  Generated by: {out['provider']}")
-        print(f"  Context Precision: {precision:.2f}")
-        print(f"  Context Recall:    {recall:.2f}")
-        print(f"  Faithfulness:      {faithfulness} ({faith_reason})")
-        print(f"  Background share:  {background:.2f}")
-        print(f"  Answer Relevancy:  {relevancy} ({rel_reason})")
-        results.append({"question": case["question"], "provider": out["provider"],
-                        "precision": precision, "recall": recall,
-                        "faithfulness": faithfulness, "background": background,
-                        "relevancy": relevancy})
+def run_eval(only: str | None = None, judge: bool = False, pause: float = 2.0) -> list[dict]:
+    """
+    Run the (filtered) golden cases, print the report, and save every result.
 
-    print(f"\n{'=' * 60}\nSUMMARY ({len(results)} of {len(GOLDEN_DATASET)} cases scored)")
-    if results:
-        print(f"Avg Context Precision: {_average([r['precision'] for r in results]):.2f}")
-        print(f"Avg Context Recall:    {_average([r['recall'] for r in results]):.2f}")
-        print(f"Avg Faithfulness:      {_average([r['faithfulness'] for r in results]):.2f}")
-        print(f"Avg Background share:  {_average([r['background'] for r in results]):.2f}")
-        print(f"Avg Answer Relevancy:  {_average([r['relevancy'] for r in results]):.2f}")
+    Parameters (where they come from — the command line below):
+        only  - --only: keep cases whose id, level or intent contains this text.
+        judge - --judge: also compute faithfulness / relevancy.
+        pause - --pause: seconds between cases (free-tier rate limits).
+    """
+    cases = [c for c in GOLDEN_DATASET
+             if not only or only in c["id"] or only in c["level"] or only in c["intent"]]
+    RESULTS_DIR.mkdir(exist_ok=True)
+    out = RESULTS_DIR / f"run_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+
+    def save(finished: bool):
+        # Rewritten after EVERY case, so a crash or a kill loses nothing done so far.
+        out.write_text(json.dumps({"cases": len(cases), "finished": finished,
+                                   "done": len(results), "passed": sum(r["passed"] for r in results),
+                                   "results": results}, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    results = []
+    for i, case in enumerate(cases, 1):
+        r = run_case(case, judge)
+        results.append(r)
+        save(finished=False)
+        print(f"[{i}/{len(cases)}] {'PASS' if r['passed'] else 'FAIL'} {case['id']} "
+              f"({r.get('provider')}, {r['seconds']}s)", flush=True)   # show progress at once, even in a log file
+        time.sleep(pause)
+
+    save(finished=True)
+    print_report(cases, results)
+    print(f"\nSaved: {out}")
     return results
 
 
 if __name__ == "__main__":
-    run_eval()
+    parser = argparse.ArgumentParser(description="Run the golden dataset")
+    parser.add_argument("--only", default=None, help="Keep cases whose id / level / intent contains this text")
+    parser.add_argument("--judge", action="store_true", help="Also LLM-judge faithfulness and relevancy")
+    parser.add_argument("--pause", type=float, default=2.0, help="Seconds between cases (default 2)")
+    parser.add_argument("--regrade", default=None, metavar="FILE",
+                        help="Re-score a saved run from eval/results/ with the current checks (no answer calls)")
+    args = parser.parse_args()
+    if args.regrade:
+        regrade(args.regrade)
+    else:
+        run_eval(args.only, args.judge, args.pause)
 
 
 # ── Where control goes next ───────────────────────────────────────────────────
-# The summary is printed and the program ends. If a score drops after a change,
-# look at features/chat/prompt.py (instructions) and features/chat/retrieval.py
-# (which chunks were found) first.
-# If every LLM provider fails: run_chat or the judge raises and the run stops.
+# The report is printed and saved to eval/results/. For a failing type, start with
+# the file named in its "needs" column, or features/chat/prompt.py (instructions) and
+# features/chat/retrieval.py (which chunks were found).
+# If every LLM provider fails for a case: it is recorded as "error" and the run continues.

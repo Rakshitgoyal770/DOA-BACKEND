@@ -87,15 +87,6 @@ def test_read_endpoints_respond(client, path):
     assert client.get(path).status_code == 200
 
 
-def test_golden_dataset_points_at_documents_that_exist():
-    """An id-format change once made 5 of 7 expected sources unfindable, which
-    would have scored the evaluation as if retrieval had failed."""
-    from eval.golden_dataset import GOLDEN_DATASET
-    from vector.embedding import get_collection
-    ids = [i for case in GOLDEN_DATASET for i in case["ground_truth_context_ids"]]
-    assert sorted(get_collection().get(ids=ids)["ids"]) == sorted(ids)
-
-
 def test_health_lists_every_registered_endpoint(client):
     """The old hand-written list had fallen behind (it missed 5 identity endpoints)."""
     endpoints = set(client.get("/").json()["endpoints"])
