@@ -4,15 +4,15 @@ features/chat/llm.py — Sends the prompt to an LLM, falling back across free pr
 
 WHAT THIS FILE DOES
     generate() tries each provider in PROVIDERS order and returns the first answer:
-        groq -> gemini -> openrouter (tries 4 free models) -> mistral
+        groq -> gemini -> openrouter (tries 4 free models)
     Free tiers rate-limit often (HTTP 429) or are briefly overloaded (503); the
     fallback keeps the chat answering. The provider that answered is returned
     too, so the API response and the evaluation can show who answered.
 
 SETUP
     API keys come from the .env file (loaded below): GROQ_API_KEY, GEMINI_API_KEY,
-    OPENROUTER_API_KEY, MISTRAL_API_KEY. A provider whose key or Python package
-    is missing simply fails and the next one is tried.
+    OPENROUTER_API_KEY. A provider whose key or Python package is missing
+    simply fails and the next one is tried. (Mistral was removed on purpose.)
 
 WHERE IT SITS
     features/chat/service.py answer_question()  --+
@@ -50,15 +50,6 @@ def call_gemini(messages):
     return resp.text
 
 
-def call_mistral(messages):
-    """Mistral (last resort). Parameter: messages from build_prompt."""
-    from mistralai.client import Mistral
-    client = Mistral(api_key=os.environ["MISTRAL_API_KEY"])
-    resp = client.chat.complete(
-        model="mistral-small-latest",
-        messages=messages,
-    )
-    return resp.choices[0].message.content
 
 
 OPENROUTER_FREE_MODELS = [
@@ -92,7 +83,6 @@ PROVIDERS = [
     ("groq", call_groq),
     ("gemini", call_gemini),
     ("openrouter", call_openrouter),
-    ("mistral", call_mistral),
 ]
 
 

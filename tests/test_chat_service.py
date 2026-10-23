@@ -47,3 +47,21 @@ def test_search_is_scoped_to_the_requested_proposal(db, monkeypatch):
     service.run_chat("why?", "P", n_results=7)
     service.run_chat("why?")
     assert calls == [(7, {"proposal_id": "P"}), (5, None)]
+
+
+def test_provider_list_is_exactly_the_providers_we_support():
+    """Mistral was removed on purpose; a half-removed provider once broke every import of the chat."""
+    import features.chat.llm as llm
+    assert [name for name, _ in llm.PROVIDERS] == ["groq", "gemini", "openrouter"]
+    assert all(callable(fn) for _, fn in llm.PROVIDERS)
+    assert not hasattr(llm, "call_mistral")
+
+
+def test_generate_falls_back_to_the_next_provider(monkeypatch):
+    import features.chat.llm as llm
+
+    def failing(messages):
+        raise RuntimeError("quota exceeded")
+
+    monkeypatch.setattr(llm, "PROVIDERS", [("first", failing), ("second", lambda m: "answer")])
+    assert llm.generate([{"role": "user", "content": "hi"}]) == ("answer", "second")

@@ -72,7 +72,7 @@ flowchart TD
     subgraph Engine ["3. Intelligent Agent & Retrieval"]
         FILTER["Scoping Filter<br/>(By proposal_id / distance &le; 0.70)"]
         PROMPT["Context Assembly<br/>(Structured System + Source Citations)"]
-        LLM["Tiered Resilient LLM Router<br/>Groq (Primary) &rarr; Gemini &rarr; OpenRouter &rarr; Mistral"]
+        LLM["Tiered Resilient LLM Router<br/>Groq (Primary) &rarr; Gemini &rarr; OpenRouter"]
     end
 
     subgraph API ["4. Production Serving Layer"]
@@ -184,7 +184,7 @@ curl -X POST "http://127.0.0.1:8000/chat" \
    * *Rationale:* Avoids distributed network hops for vector search. Using `BAAI/bge-small-en-v1.5` embeddings (384 dimensions) provides high semantic density and fast Euclidean/cosine distance calculations while fitting comfortably in memory.
 3. **Why a Multi-Tier Resilient LLM Router?**
    * *Rationale:* Free-tier inference providers enforce strict TPM (Tokens Per Minute) and RPM limits (e.g. Groq 8,000 TPM on large models). The engine implements a tiered fallback:
-     $$\text{Groq (Ultra-Low Latency)} \xrightarrow{429 / \text{Error}} \text{Google Gemini} \xrightarrow{\text{Fail}} \text{OpenRouter} \xrightarrow{\text{Fail}} \text{Mistral}$$
+     $$\text{Groq (Ultra-Low Latency)} \xrightarrow{429 / \text{Error}} \text{Google Gemini} \xrightarrow{\text{Fail}} \text{OpenRouter}$$
    * Ensures uninterrupted service even during peak rate-limiting events.
 4. **Distance Filtering (`max_distance = 0.70`):**
    * *Rationale:* Standard vector search returns the top $K$ items regardless of quality. Enforcing a cosine distance ceiling prevents irrelevant chunks from diluting prompt context and causing hallucinated answers.
@@ -276,7 +276,6 @@ pip install -r requirements.txt
 GROQ_API_KEY=your_groq_key
 GEMINI_API_KEY=your_gemini_key
 OPENROUTER_API_KEY=your_openrouter_key
-MISTRAL_API_KEY=your_mistral_key
 ```
 
 ### Running the API
@@ -330,7 +329,7 @@ You can copy and adapt these bullet points directly for software engineering and
   > *“Engineered a production-ready governance intelligence backend using FastAPI, SQLite, and ChromaDB, ingesting 118 proposals and 515,000+ votes across 5 DAOs from Snapshot GraphQL and Discourse APIs.”*
 
 * **Machine Learning / RAG:**
-  > *“Architected an evaluated RAG pipeline with dense vector indexing (BAAI/bge-small-en-v1.5) and a 4-tier resilient LLM fallback router (Groq &rarr; Gemini &rarr; OpenRouter &rarr; Mistral) with automatic 429 backoff handling.”*
+  > *“Architected an evaluated RAG pipeline with dense vector indexing (BAAI/bge-small-en-v1.5) and a 3-tier resilient LLM fallback router (Groq &rarr; Gemini &rarr; OpenRouter) with automatic 429 backoff handling.”*
 
 * **Evaluation & Impact:**
   > *“Benchmarked retrieval quality using an automated LLM-as-a-judge evaluation harness over a golden dataset, achieving 87% Context Recall, 90% Faithfulness, and 100% Answer Relevancy.”*

@@ -51,7 +51,7 @@ Example: `POST /chat {"query": "Why did people support it?", "proposal_id": "0xe
 | 6 | [features/chat/context.py](features/chat/context.py) | `collect_facts` | For each proposal behind the chunks (max 3): result, voters, posters, silence ratio, top-4 share | `facts` |
 | 7 | [features/metrics.py](features/metrics.py) | `top_voter_share`, `silence_ratio_pct`, … | The formulas used in step 6 (the **same** ones the endpoints use) | numbers |
 | 8 | [features/chat/prompt.py](features/chat/prompt.py) | `build_prompt` | Writes the system rules + facts block + numbered sources + question | 2 messages |
-| 9 | [features/chat/llm.py](features/chat/llm.py) | `generate` | Tries Groq → Gemini → OpenRouter → Mistral until one answers | answer, provider |
+| 9 | [features/chat/llm.py](features/chat/llm.py) | `generate` | Tries Groq → Gemini → OpenRouter until one answers | answer, provider |
 
 **What the LLM actually receives (step 8):**
 ```

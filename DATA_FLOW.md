@@ -266,7 +266,7 @@ Important behavior:
 3. If no chunks remain, [`features/chat/routes.py`](./features/chat/routes.py) returns
    HTTP 404 rather than calling an LLM without context.
 4. [`features/chat/llm.py`](./features/chat/llm.py) tries providers in this
-   order: Groq, Gemini, OpenRouter, then Mistral.
+   order: Groq, Gemini, then OpenRouter.
 5. The response preserves the retrieved document, source type, proposal ID,
    author, voting power, and distance for traceability.
 

@@ -46,7 +46,7 @@ app = FastAPI(
         "of the stored proposals\n"
         "- Measured findings and their scope: see the project README\n\n"
         "**Architecture:** SQLite (structured data) + ChromaDB (vector store) + "
-        "multi-provider LLM fallback (Groq → Gemini → OpenRouter → Mistral)"
+        "multi-provider LLM fallback (Groq → Gemini → OpenRouter)"
     ),
     version="0.1.0",
     contact={
