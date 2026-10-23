@@ -9,6 +9,12 @@ WHAT THIS FILE DOES
     fallback keeps the chat answering. The provider that answered is returned
     too, so the API response and the evaluation can show who answered.
 
+CHECK YOUR PROVIDERS
+    python -m features.chat.llm      tests EACH provider separately and shows why one fails
+    (missing package, missing key, exhausted free quota ...). Run it with the same Python
+    you use for the server / evaluation: a package installed in .venv is not installed in
+    the global Python, and the other way round.
+
 SETUP
     API keys come from the .env file (loaded below): GROQ_API_KEY, GEMINI_API_KEY,
     OPENROUTER_API_KEY. A provider whose key or Python package is missing
@@ -108,12 +114,30 @@ def generate(messages: list[dict]) -> tuple[str, str]:
     raise RuntimeError(f"All providers failed. Last error: {last_error}")
 
 
+def check_providers() -> dict[str, str]:
+    """
+    Send one tiny request to EVERY provider, one by one (not the fallback chain),
+    and print which work and why the others fail. Returns {provider: "ok" | error}.
+    Each working provider uses one request of its free quota.
+    """
+    import time
+    ping = [{"role": "user", "content": "Reply with the single word: ok"}]
+    status = {}
+    for name, call in PROVIDERS:
+        started = time.time()
+        try:
+            call(ping)
+            status[name] = "ok"
+            print(f"  {name:<11} WORKS  ({time.time() - started:.1f}s)")
+        except Exception as e:
+            status[name] = " ".join(f"{type(e).__name__}: {e}".split())     # one line, no line breaks
+            print(f"  {name:<11} FAILS  {status[name][:300]}")
+    return status
+
+
 if __name__ == "__main__":
-    # Manual check of your keys: python -m features.chat.llm
-    text, provider = generate([
-        {"role": "user", "content": "Say hello in one short sentence."}
-    ])
-    print(f"Response from {provider}: {text}")
+    # python -m features.chat.llm
+    check_providers()
 
 
 # ── Where control goes next ───────────────────────────────────────────────────
@@ -121,4 +145,4 @@ if __name__ == "__main__":
 #   features/chat/routes.py (POST /chat) or eval/eval_harness.py.
 # If every provider fails: RuntimeError -> the API returns HTTP 500.
 # A failing provider is only printed ("[groq failed: ...] falling back...");
-#   check that output if answers suddenly come from a different provider.
+#   run python -m features.chat.llm to see each provider's status and error at once.
