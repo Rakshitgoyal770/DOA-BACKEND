@@ -1,28 +1,27 @@
 # features/chat/context.py
 """
-features/chat/context.py — Adds database facts to the text chunks before the LLM sees them.
+features/chat/context.py — Database facts about ONE proposal or ONE forum author.
 
 WHAT THIS FILE DOES
-    Vector search (features/chat/retrieval.py) returns TEXT: proposal paragraphs
-    and forum posts. The numbers that explain a vote live in SQLite. This file
-    looks them up, live, for the chunks that were found:
-      * collect_facts   one "PROPOSAL FACTS" entry per proposal behind the chunks:
-                        result, turnout, forum posters, silence ratio, top-4 share
-      * enrich_chunks   for each forum post: the author's linked wallet, ENS name,
-                        link confidence, and how much voting power they used and
-                        what they voted on THIS proposal
-      * format_facts / source_label   turn those into short lines for the prompt
-    The LLM never reads the database itself; it reads the text built here.
+    Small, tested building blocks that read SQLite (never the LLM):
+      * proposal_facts   one proposal: result per choice, winner, voters, forum posters,
+                         silence ratio (forum posters / voters), top-4 voting-power share
+      * author_context   who a forum author is on-chain: linked wallet, ENS name, how
+                         confident the link is, and (for one proposal) how much voting
+                         power they used and what they voted
+      * enrich_chunks    author_context() for every forum-post chunk a search returned
+      * source_label     the header line of one source in the writer's prompt
+    Which of these run for a question is decided by the agent
+    (features/chat/agent.py), through the lookups in features/chat/tools.py.
 
 WHERE IT SITS
-    POST /chat -> features/chat/service.py run_chat()
-        1. features/chat/retrieval.py   find chunks          (ChromaDB)
-        2. THIS FILE                    add SQL facts         (SQLite, read-only)
-        3. features/chat/prompt.py      write the prompt     (uses format_facts, source_label)
-        4. features/chat/llm.py         get the answer
+    features/chat/tools.py  (proposal_details, person, search_forum)  --> THIS FILE
+    features/chat/prompt.py (source_label)                            --> THIS FILE
+    The formulas live in features/metrics.py, so the chat, /proposals and /daos
+    always agree.
 
 INPUTS
-    conn   - SQLite connection opened by run_chat() in features/chat/service.py.
+    conn   - SQLite connection opened by the caller (agent.py gather_evidence, or a test).
     chunks - list returned by retrieval.retrieve(): each has "id", "document",
              "distance" and "metadata" (source_type, proposal_id, author, ...).
 """
@@ -33,7 +32,6 @@ from features.identity.common import verified_ens_name
 from features.metrics import (choice_text, count_forum_posters, decode_choice,
                               silence_ratio_pct, top_voter_share)
 
-MAX_PROPOSALS = 3          # facts for at most 3 proposals, to stay inside free-tier token limits
 TOP_N_WHALES = 4           # the "top-N wallets" share reported in the facts
 
 
@@ -52,8 +50,9 @@ def proposal_facts(conn, proposal_id: str) -> dict | None:
     Structured facts about one proposal, or None if it is not in SQLite.
 
     Parameters (where they come from):
-        conn        - opened by run_chat() (or a test).
-        proposal_id - a retrieved chunk's metadata["proposal_id"] (via collect_facts).
+        conn        - opened by the caller.
+        proposal_id - chosen by the agent (tools.proposal_details), usually taken from
+                      tools.find_proposals; or a test.
 
     Returns: dao, title, state, results (choice / score / share %), winning_choice,
     total_voters, forum_posters, silence_ratio_pct, top_4_voters_share_pct,
@@ -96,32 +95,12 @@ def proposal_facts(conn, proposal_id: str) -> dict | None:
     }
 
 
-def format_facts(f: dict) -> str:
-    """
-    One proposal's facts as compact text for the prompt.
-
-    Parameter (where it comes from):
-        f - one entry of collect_facts(); features/chat/prompt.py build_prompt calls this.
-    """
-    lines = [f"- {f['dao']} | \"{f['title']}\" | state: {f['state']}"]
-    if f["results"]:
-        res = "; ".join(f"{r['choice']} {r['share_pct']}%" for r in f["results"] if r["share_pct"] is not None)
-        lines.append(f"  result: {res} (winner: {f['winning_choice']})")
-    lines.append(f"  voters: {f['total_voters']}; forum posters: {f['forum_posters']}"
-                 + (f" (silence ratio {f['silence_ratio_pct']}%)" if f["silence_ratio_pct"] is not None else ""))
-    top = f.get(f"top_{TOP_N_WHALES}_voters_share_pct")
-    if top is not None:
-        note = f" (at least; only {f['votes_loaded']} of {f['total_voters']} votes loaded)" if f["votes_partial"] else ""
-        lines.append(f"  top {TOP_N_WHALES} loaded voters hold {top}% of total voting power{note}")
-    return "\n".join(lines)
-
-
 def author_context(conn, proposal_id: str | None, username: str | None) -> dict:
     """
     Who a forum author is on-chain, for one proposal. Empty dict if not linked.
 
     Parameters (where they come from):
-        conn        - opened by run_chat().
+        conn        - opened by the caller.
         proposal_id - the chunk's metadata["proposal_id"] (via enrich_chunks).
         username    - the chunk's metadata["author"], the Discourse username.
 
@@ -163,7 +142,7 @@ def enrich_chunks(conn, chunks: list[dict]) -> list[dict]:
     Adds chunk["sql"] to every chunk: author_context() for forum posts, {} otherwise.
 
     Parameters (where they come from):
-        conn   - opened by run_chat().
+        conn   - opened by the caller (tools.search_forum).
         chunks - the list returned by features/chat/retrieval.retrieve().
     Changes the chunks in place and also returns them.
     """
@@ -172,28 +151,6 @@ def enrich_chunks(conn, chunks: list[dict]) -> list[dict]:
         c["sql"] = (author_context(conn, meta.get("proposal_id"), meta.get("author"))
                     if meta.get("source_type") == "forum_post" else {})
     return chunks
-
-
-def collect_facts(conn, chunks: list[dict], max_proposals: int = MAX_PROPOSALS) -> list[dict]:
-    """
-    proposal_facts() for the distinct proposals behind the chunks, best match first.
-
-    Parameters (where they come from):
-        conn          - opened by run_chat().
-        chunks        - from retrieval.retrieve(), already sorted by distance.
-        max_proposals - MAX_PROPOSALS (3) unless a caller asks otherwise.
-    """
-    seen, facts = set(), []
-    for c in chunks:
-        pid = c["metadata"].get("proposal_id")
-        if pid and pid not in seen:
-            seen.add(pid)
-            f = proposal_facts(conn, pid)
-            if f:
-                facts.append(f)
-        if len(facts) >= max_proposals:
-            break
-    return facts
 
 
 def source_label(i: int, c: dict) -> str:
@@ -225,9 +182,8 @@ def source_label(i: int, c: dict) -> str:
 
 
 # ── Where control goes next ───────────────────────────────────────────────────
-# Usual next file: features/chat/prompt.py — build_prompt() calls format_facts()
-#   and source_label() to write the text the LLM receives.
-# Then:            features/chat/llm.py — generate() sends it to the LLM.
-# If a chunk's proposal is not in SQLite: proposal_facts returns None and that
-#   proposal is simply left out of the facts block.
+# Usual next file: features/chat/tools.py — its lookups call these functions.
+# Then:            features/chat/prompt.py — build_prompt() uses source_label().
+# If a proposal is not in SQLite: proposal_facts returns None (tools.proposal_details
+#   turns that into an error the agent can read and recover from).
 # If an author has no wallet link: the label says "(wallet unknown)".

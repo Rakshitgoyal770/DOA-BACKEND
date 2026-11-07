@@ -5,8 +5,8 @@ features/chat/routes.py — The POST /chat HTTP endpoint.
 WHAT THIS FILE DOES
     Accepts a question, runs the chat pipeline (features/chat/service.py
     run_chat), and returns the answer together with the sources it used and
-    the database facts that were put in the prompt. HTTP layer only: no search,
-    SQL or LLM code lives here.
+    the database lookups the agent made to gather its evidence. HTTP layer only:
+    no search, SQL or LLM code lives here.
 
 WHERE IT SITS
     client --HTTP--> main.py (router registered there) --> THIS FILE
@@ -18,14 +18,15 @@ INPUTS (the JSON request body, validated by ChatRequest)
     n_results   : int  — chunks to retrieve before filtering (1-20, default 5)
 
 OUTPUT (ChatResponse)
-    answer, provider (which LLM answered), chunks_found, sources (each chunk with
-    author, wallet, voting power, distance), proposal_facts (the SQL facts used).
+    answer, provider (which LLM answered), chunks_found, sources (each passage with
+    author, wallet, voting power, distance), lookups (what the agent asked the database,
+    with the results: rankings, one proposal's numbers, a person's vote ...).
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from features.chat.service import run_chat
+from features.chat.service import lookups, run_chat
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
 
@@ -63,7 +64,7 @@ class ChatResponse(BaseModel):
     provider: str
     chunks_found: int
     sources: list[SourceChunk]
-    proposal_facts: list[dict] = []     # SQL facts for the proposals behind the sources
+    lookups: list[dict] = []            # [{"tool", "arguments", "result"}]: what the agent looked up
 
 
 def _source(c: dict) -> SourceChunk:
@@ -95,34 +96,30 @@ def _source(c: dict) -> SourceChunk:
 @router.post("", response_model=ChatResponse, summary="Ask a governance question")
 def chat(req: ChatRequest):
     """
-    Retrieves relevant chunks (optionally scoped to one proposal), adds the
-    database facts, builds a cited prompt, and returns the LLM's answer with
-    the sources that were used.
+    An agent first looks up what the question needs in the database (rankings, one
+    proposal's numbers, a person's vote, forum passages); a writer then answers from
+    that evidence with citations. The response carries the answer, the passages it
+    was built from, and the lookups.
 
     Set `proposal_id` for deep-dive questions about one proposal
     ("who argued against this and why?"); leave it null for cross-DAO questions.
     """
     result = run_chat(req.query, req.proposal_id, req.n_results)
-    if result["answer"] is None:
-        raise HTTPException(
-            status_code=404,
-            detail=("No relevant context found for this query. "
-                    "Try broadening the question or removing the proposal_id filter."),
-        )
     return ChatResponse(
         query=req.query,
         answer=result["answer"],
         provider=result["provider"],
         chunks_found=len(result["chunks"]),
         sources=[_source(c) for c in result["chunks"]],
-        proposal_facts=result["facts"],
+        lookups=lookups(result["evidence"]),
     )
 
 
 # ── Where control goes next ───────────────────────────────────────────────────
 # Usual next file: features/chat/service.py — run_chat() does the actual work.
 # After it returns, FastAPI sends ChatResponse as JSON and the request ends.
-# If no chunk is close enough: HTTP 404 (the LLM is never called).
+# If nothing in our data matches (or the question needs no lookup): HTTP 200 with an
+#   answer that says so (or gives [Background] knowledge); there is no 404 any more.
 # If the request body is invalid (e.g. query shorter than 3 characters):
 #   FastAPI answers 422 before this code runs.
 # If every LLM provider fails: run_chat raises and the client gets HTTP 500.
