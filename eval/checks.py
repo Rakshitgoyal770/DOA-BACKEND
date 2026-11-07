@@ -102,17 +102,26 @@ def check_mentions(answer: str, expected: list[str]) -> list[str]:
     return missing
 
 
+def _post_level(doc_id: str) -> str:
+    """'forum_post_<p>_<post>_c2' -> 'forum_post_<p>_<post>': all chunks of one forum post count as that post."""
+    return re.sub(r"_c\d+$", "", doc_id)
+
+
 def check_sources(retrieved_ids: list[str], expected: list[str]) -> tuple[bool, float]:
     """
     (at least one expected document retrieved?, recall = share of expected ones retrieved).
+    A long forum post is stored as several chunks; retrieving any of them counts as
+    retrieving the post (see _post_level).
 
     Parameters (where they come from — grade): ids of run_chat()'s chunks and
     case["expected"]["sources"].
     """
     if not expected:
         return True, 1.0
-    hit = [i for i in expected if i in retrieved_ids]
-    return bool(hit), len(hit) / len(expected)
+    retrieved = {_post_level(i) for i in retrieved_ids}
+    wanted = {_post_level(i) for i in expected}
+    hit = wanted & retrieved
+    return bool(hit), len(hit) / len(wanted)
 
 
 _BEHAVIOR_QUESTIONS = {

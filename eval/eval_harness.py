@@ -17,7 +17,7 @@ WHAT THIS FILE DOES
 
     With --judge it also computes the LLM-judged quality scores:
         faithfulness       are the answer's claims supported by the sources and the
-                           PROPOSAL FACTS? ([Background] sentences are left out)
+                           DATABASE FACTS? ([Background] sentences are left out)
         answer relevancy   does the answer address the question?
     plus the exact "background share" (sentences marked [Background]).
 
@@ -25,13 +25,17 @@ RUN
     python -m eval.eval_harness                     all cases, exact checks (+ behaviour judge)
     python -m eval.eval_harness --only proposal     cases whose id/level/intent contains "proposal"
     python -m eval.eval_harness --judge             also faithfulness + relevancy (3 more LLM calls a case)
+    python -m eval.eval_harness --resume eval/results/run_X.json
+                                                    continue an unfinished run (it crashed, was stopped, or
+                                                    some cases ended in ERROR): cases already answered are
+                                                    kept, only the missing / errored ones are run again.
     python -m eval.eval_harness --regrade eval/results/run_X.json
                                                     re-score a saved run with the CURRENT checks and
                                                     dataset. Reuses the saved answers and behaviour
                                                     verdicts: zero LLM calls, so no quota.
-    Run it with the project's own interpreter (.venv), which has groq / mistralai installed.
-    Each case makes 1 LLM call for the answer (+1 for judged behaviours). Free tiers
-    rate-limit, so cases are spaced by --pause seconds (default 2).
+    Run it with the project's own interpreter (.venv), which has groq installed.
+    Each case makes 2-6 LLM calls: the agent's lookups (1-5), the writer (1), and +1 for judged
+    behaviours. Free tiers rate-limit, so cases are spaced by --pause seconds (default 2).
 
 WHERE IT SITS
     THIS FILE --> features/chat/service.py run_chat (answers)
@@ -51,9 +55,8 @@ from pathlib import Path
 
 from eval.checks import grade
 from eval.golden_dataset import GOLDEN_DATASET
-from features.chat.context import format_facts
 from features.chat.llm import generate
-from features.chat.prompt import BACKGROUND_TAG
+from features.chat.prompt import BACKGROUND_TAG, format_facts, split_evidence
 from features.chat.service import run_chat
 
 RESULTS_DIR = Path(__file__).with_name("results")
@@ -101,21 +104,23 @@ def background_share(answer: str) -> float:
     return sum(BACKGROUND_TAG in s for s in sentences) / len(sentences) if sentences else 0.0
 
 
-def score_faithfulness(answer: str, context_chunks: list[str], facts: list[dict]) -> tuple[float | None, str]:
+def score_faithfulness(answer: str, context_chunks: list[str], evidence: list[dict]) -> tuple[float | None, str]:
     """
     Judge: what fraction of the answer's specific claims are supported by the
-    material the model was given — the source chunks AND the PROPOSAL FACTS.
+    material the model was given — the source passages AND the DATABASE FACTS.
     [Background] sentences are general knowledge the prompt allows; they are
     excluded here and tracked by background_share instead.
 
     Parameters (where they come from — run_eval):
         answer         - run_chat()["answer"].
         context_chunks - the text of run_chat()'s chunks.
-        facts          - run_chat()["facts"] (shown to the judge exactly as the prompt showed them).
+        evidence       - run_chat()["evidence"]; its lookups are shown to the judge exactly as
+                         the writer's prompt showed them (prompt.format_facts).
     """
     material = "\n\n".join(context_chunks)
+    facts = format_facts(split_evidence(evidence)[1])
     if facts:
-        material = "PROPOSAL FACTS:\n" + "\n".join(format_facts(f) for f in facts) + "\n\n" + material
+        material = facts + "\n\n" + material
     return _judge("Given the material below and a generated answer, determine what fraction of "
                   f"the answer's claims are directly supported by the material. IGNORE every sentence "
                   f"that starts with {BACKGROUND_TAG}: it is permitted general background and must not "
@@ -143,8 +148,8 @@ def run_case(case: dict, judge: bool) -> dict:
     Parameters (where they come from — run_eval):
         case  - one GOLDEN_DATASET entry.
         judge - the --judge flag.
-    Only scope["proposal_id"] is passed on: run_chat has no DAO scope yet, so a
-    dao_id is ignored (those cases show what happens without it).
+    Only scope["proposal_id"] is passed on: a dao_id in the scope is ignored, because the
+    agent works out the DAO from the question itself.
     """
     started = time.time()
     try:
@@ -158,7 +163,8 @@ def run_case(case: dict, judge: bool) -> dict:
     result = {"id": case["id"], "question": case["question"], **grade(case, out["answer"], retrieved),
               "answer": out["answer"], "provider": out["provider"], "retrieved": retrieved}
     if judge and out["answer"]:
-        result["faithfulness"], _ = score_faithfulness(out["answer"], [c["document"] for c in out["chunks"]], out["facts"])
+        result["faithfulness"], _ = score_faithfulness(out["answer"], [c["document"] for c in out["chunks"]],
+                                                    out["evidence"])
         result["relevancy"], _ = score_answer_relevancy(case["question"], out["answer"])
         result["background_share"] = background_share(out["answer"])
     result["seconds"] = round(time.time() - started, 1)
@@ -247,19 +253,28 @@ def regrade(path: str) -> list[dict]:
     return results
 
 
-def run_eval(only: str | None = None, judge: bool = False, pause: float = 2.0) -> list[dict]:
+def run_eval(only: str | None = None, judge: bool = False, pause: float = 2.0,
+             resume: str | None = None) -> list[dict]:
     """
     Run the (filtered) golden cases, print the report, and save every result.
 
     Parameters (where they come from — the command line below):
-        only  - --only: keep cases whose id, level or intent contains this text.
-        judge - --judge: also compute faithfulness / relevancy.
-        pause - --pause: seconds between cases (free-tier rate limits).
+        only   - --only: keep cases whose id, level or intent contains this text.
+        judge  - --judge: also compute faithfulness / relevancy.
+        pause  - --pause: seconds between cases (free-tier rate limits).
+        resume - --resume: a file in eval/results/ to continue. Its answered cases are
+                 kept as they are; cases that are missing or ended in ERROR run again,
+                 and the same file is updated.
     """
     cases = [c for c in GOLDEN_DATASET
              if not only or only in c["id"] or only in c["level"] or only in c["intent"]]
     RESULTS_DIR.mkdir(exist_ok=True)
-    out = RESULTS_DIR / f"run_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    if resume:
+        out = Path(resume)
+        kept = {r["id"]: r for r in json.loads(out.read_text(encoding="utf-8"))["results"] if not r.get("error")}
+    else:
+        out = RESULTS_DIR / f"run_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        kept = {}
 
     def save(finished: bool):
         # Rewritten after EVERY case, so a crash or a kill loses nothing done so far.
@@ -267,15 +282,19 @@ def run_eval(only: str | None = None, judge: bool = False, pause: float = 2.0) -
                                    "done": len(results), "passed": sum(r["passed"] for r in results),
                                    "results": results}, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    results = []
-    for i, case in enumerate(cases, 1):
+    results = [kept[c["id"]] for c in cases if c["id"] in kept]
+    todo = [c for c in cases if c["id"] not in kept]
+    if resume:
+        print(f"Resuming {out.name}: {len(results)} cases kept, {len(todo)} to run", flush=True)
+    for i, case in enumerate(todo, 1):
         r = run_case(case, judge)
         results.append(r)
         save(finished=False)
-        print(f"[{i}/{len(cases)}] {'PASS' if r['passed'] else 'FAIL'} {case['id']} "
+        print(f"[{len(results)}/{len(cases)}] {'PASS' if r['passed'] else 'FAIL'} {case['id']} "
               f"({r.get('provider')}, {r['seconds']}s)", flush=True)   # show progress at once, even in a log file
         time.sleep(pause)
 
+    results.sort(key=lambda r: [c["id"] for c in cases].index(r["id"]))
     save(finished=True)
     print_report(cases, results)
     print(f"\nSaved: {out}")
@@ -287,13 +306,15 @@ if __name__ == "__main__":
     parser.add_argument("--only", default=None, help="Keep cases whose id / level / intent contains this text")
     parser.add_argument("--judge", action="store_true", help="Also LLM-judge faithfulness and relevancy")
     parser.add_argument("--pause", type=float, default=2.0, help="Seconds between cases (default 2)")
+    parser.add_argument("--resume", default=None, metavar="FILE",
+                        help="Continue an unfinished run from eval/results/ (skips answered cases)")
     parser.add_argument("--regrade", default=None, metavar="FILE",
                         help="Re-score a saved run from eval/results/ with the current checks (no answer calls)")
     args = parser.parse_args()
     if args.regrade:
         regrade(args.regrade)
     else:
-        run_eval(args.only, args.judge, args.pause)
+        run_eval(args.only, args.judge, args.pause, args.resume)
 
 
 # ── Where control goes next ───────────────────────────────────────────────────

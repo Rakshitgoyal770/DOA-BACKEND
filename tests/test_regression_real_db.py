@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 import db.schema as schema
 from features.chat import service as chat_service
+from features.chat import tools
 from features.chat.context import proposal_facts
 from features.forum.completeness import forum_completeness
 from features.sync.audit import audit_collection_status
@@ -106,13 +107,45 @@ def test_concentration_endpoint_matches_chat_facts(client, conn):
     assert api == proposal_facts(conn, DEFILLAMA)["top_4_voters_share_pct"]
 
 
-def test_chat_merges_sql_facts_into_the_response(client, monkeypatch):
-    chunk = {"id": "forum_post_x", "document": "I support this.", "distance": 0.4,
+def test_chat_response_carries_the_sources_and_the_lookups(client, conn, monkeypatch):
+    chunk = {"id": "forum_post_x", "document": "I support this.", "distance": 0.4, "sql": {},
              "metadata": {"source_type": "forum_post", "proposal_id": DEFILLAMA, "author": "someone"}}
-    monkeypatch.setattr(chat_service, "retrieve", lambda *a, **k: [dict(chunk)])
-    monkeypatch.setattr(chat_service, "answer_question", lambda q, chunks, facts=None: ("stub", "stub"))
+    evidence = [{"tool": "proposal_details", "arguments": {"proposal_id": DEFILLAMA},
+                 "result": tools.proposal_details(conn, DEFILLAMA)},
+                {"tool": "search_forum", "arguments": {"query": "why"}, "result": {"chunks": [chunk]}}]
+    monkeypatch.setattr(chat_service, "gather_evidence", lambda *a: evidence)
+    monkeypatch.setattr(chat_service, "answer_question", lambda *args, **kwargs: ("stub", "stub"))
 
     body = client.post("/chat", json={"query": "Why did it pass?", "proposal_id": DEFILLAMA}).json()
 
-    assert body["proposal_facts"][0]["winning_choice"] == "For"
+    assert body["lookups"][0]["result"]["winning_choice"] == "For"
+    assert body["lookups"][1]["result"] == {"passages_found": 1}          # the passage itself is in "sources"
     assert body["sources"][0]["source_type"] == "forum_post"
+
+
+# ── the chat lookups on real data: answers the old pipeline got wrong ─────────
+
+def test_most_voters_across_all_daos_is_found(conn):
+    """The old pipeline said 1,019 (it only saw the 3 proposals search returned)."""
+    top = tools.list_proposals(conn, "voters", limit=1)
+    assert top["proposals"][0]["voters"] == 63845 and top["proposals"][0]["dao"] == "Optimism Collective"
+    assert top["scope"].startswith("all 118 proposals we hold for all 5 DAOs")
+
+
+def test_the_largest_voter_on_oat_elections_and_their_ballot(conn):
+    """The old pipeline named a smaller voter (maxlomu.eth)."""
+    oat = tools.find_proposals(conn, "OAT Elections")[0]
+    voter = tools.top_voters(conn, oat["proposal_id"], 1)["top_voters"][0]
+    assert (voter["forum_username"], voter["voting_power"]) == ("entropy", 33030451.22)
+    assert voter["ballot"] == "Pedro Breuer: 6600000, Patrick McCorry: 13200000, A.J. Warner: 13200000"
+
+
+def test_griffs_vote_is_found_by_name(conn):
+    """The old pipeline said there was no information about griff."""
+    frozen = tools.find_proposals(conn, "Approve Release of Frozen ETH")[0]
+    assert tools.person(conn, "griff", frozen["proposal_id"])["vote_on_this_proposal"] ==         {"ballot": "For", "voting_power": 9677958.25}
+
+
+def test_ens_has_the_highest_average_silence_ratio(conn):
+    ratios = {d["dao"]: d["avg_silence_ratio_pct"] for d in tools.dao_stats(conn)["daos"]}
+    assert max(ratios, key=ratios.get) == "ENS" and ratios["ENS"] == 11.549

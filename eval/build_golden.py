@@ -158,16 +158,23 @@ def raw_choice_names(choice_json: str, choices: list[str]):
 
 
 def post_ids(conn, pid: str, author: str) -> list[str]:
-    """Index ids of an author's posts on a proposal (format of vector/embedding.py)."""
+    """
+    Post-level ids of an author's posts on a proposal: forum_post_<proposal>_<post>.
+    A long post is stored as several chunks (..._c0, ..._c1); eval/checks.py treats every
+    chunk as its post, so the post-level id is what the dataset needs.
+    """
     return [f"forum_post_{pid}_{r[0]}" for r in conn.execute(
         "SELECT id FROM forum_posts WHERE proposal_id = ? AND lower(username) = ? AND content != ''",
         (pid, author))]
 
 
 def body_chunk_ids(pid: str, conn) -> list[str]:
-    from vector.chunking import chunk_proposal_body
+    """Index ids of a proposal body's chunks, chunked exactly as vector/embedding.py does it."""
+    from vector.chunking import PROPOSAL_MAX_CHARS, chunk_text
+    from vector.embedding import get_model, token_counter
     body = conn.execute("SELECT body FROM proposals WHERE id = ?", (pid,)).fetchone()[0]
-    return [f"proposal_{pid}_{i}" for i in range(len(chunk_proposal_body(body)))]
+    chunks = chunk_text(body, PROPOSAL_MAX_CHARS, token_counter(get_model()))
+    return [f"proposal_{pid}_{i}" for i in range(len(chunks))]
 
 
 # ── Case builder ──────────────────────────────────────────────────────────────

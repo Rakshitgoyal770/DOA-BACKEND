@@ -38,6 +38,9 @@ def test_mentions_and_long_titles():
 def test_sources_need_at_least_one_hit():
     assert checks.check_sources(["a", "b"], ["b", "c"]) == (True, 0.5)
     assert checks.check_sources(["a"], ["c"]) == (False, 0.0)
+    # any chunk of a long forum post counts as that post
+    assert checks.check_sources(["forum_post_P_7_c2"], ["forum_post_P_7"]) == (True, 1.0)
+    assert checks.check_sources(["forum_post_P_7_c0", "forum_post_P_7_c1"], ["forum_post_P_7", "forum_post_P_8"]) == (True, 0.5)
     assert checks.check_sources([], []) == (True, 1.0)
 
 
@@ -109,8 +112,12 @@ def test_stable_expected_numbers_agree_with_the_apps_own_formulas():
 @real_db
 def test_every_expected_source_exists_in_the_search_index():
     from vector.embedding import get_collection
-    ids = sorted({i for c in GOLDEN_DATASET for i in c["expected"]["sources"]})
-    assert sorted(get_collection().get(ids=ids)["ids"]) == ids
+    import re
+    wanted = {i for c in GOLDEN_DATASET for i in c["expected"]["sources"]}
+    col = get_collection()
+    indexed = set(col.get(include=[], limit=col.count())["ids"])
+    indexed_post_level = {re.sub(r"_c\d+$", "", i) for i in indexed}          # a long post is stored as _c0, _c1...
+    assert wanted <= indexed_post_level, sorted(wanted - indexed_post_level)
 
 
 @real_db
@@ -177,3 +184,30 @@ def test_regrade_rescored_saved_answers_without_calling_the_llm(tmp_path, monkey
     results = harness.regrade(str(saved))
 
     assert len(results) == 1 and results[0]["passed"] is True          # re-scored with the current checks
+
+
+def test_resume_keeps_answered_cases_and_reruns_only_missing_or_errored(tmp_path, monkeypatch):
+    import json
+    import eval.eval_harness as harness
+    cases = [{"id": i, "level": "proposal", "intent": "result", "needs": None, "question": f"Q{i}?", "scope": {},
+              "expected": {"numbers": [], "mentions": [], "sources": [], "behavior": "answer"}} for i in "abc"]
+    monkeypatch.setattr(harness, "GOLDEN_DATASET", cases)
+    ran = []
+
+    def fake_case(case, judge):
+        ran.append(case["id"])
+        return {"id": case["id"], "passed": True, "failures": [], "answer": "ok", "provider": "fake", "seconds": 0}
+
+    monkeypatch.setattr(harness, "run_case", fake_case)
+    saved = tmp_path / "run.json"
+    saved.write_text(json.dumps({"results": [
+        {"id": "a", "passed": True, "failures": [], "answer": "kept", "provider": "groq", "seconds": 1},
+        {"id": "b", "passed": False, "error": True, "failures": ["error: quota"], "answer": None, "seconds": 1},
+    ]}), encoding="utf-8")
+
+    results = harness.run_eval(pause=0, resume=str(saved))
+
+    assert ran == ["b", "c"]                                     # "a" was kept, the errored "b" and missing "c" ran
+    assert [r["id"] for r in results] == ["a", "b", "c"]
+    assert results[0]["answer"] == "kept"
+    assert json.loads(saved.read_text(encoding="utf-8"))["finished"] is True

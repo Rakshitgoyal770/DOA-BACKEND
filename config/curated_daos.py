@@ -14,20 +14,22 @@ WHY A HAND-PICKED LIST
     space(id: "...") lookup.
 
 TO ADD A DAO
-    Append {"id": "<snapshot space id>", "name": "<display name>"}, then run
+    Append {"id": "<snapshot space id>", "name": "<display name>", "aliases": [...]}, then run
     python -m features.sync.runner --sync-all: the next sync stores its space row
     and its latest 20 proposals, then their forum threads and votes.
 """
 
+# "aliases" are the words people use for the DAO in a question; the chat looks for
+# them (whole words, any case) to add that DAO's facts (features/chat/context.py).
 CURATED_DAOS = [
-    {"id": "arbitrumfoundation.eth", "name": "Arbitrum DAO"},
-    {"id": "aavedao.eth", "name": "Aave DAO"},
-    {"id": "opcollective.eth", "name": "Optimism Collective"},
-    {"id": "uniswapgovernance.eth", "name": "Uniswap"},
-    {"id": "ens.eth", "name": "ENS"},
+    {"id": "arbitrumfoundation.eth", "name": "Arbitrum DAO", "aliases": ["arbitrum"]},
+    {"id": "aavedao.eth", "name": "Aave DAO", "aliases": ["aave"]},
+    {"id": "opcollective.eth", "name": "Optimism Collective", "aliases": ["optimism", "op collective"]},
+    {"id": "uniswapgovernance.eth", "name": "Uniswap", "aliases": ["uniswap"]},
+    {"id": "ens.eth", "name": "ENS", "aliases": ["ens"]},
 ]
 
 
 # ── Where control goes next ───────────────────────────────────────────────────
-# Read by features/proposals/fetch.py (what to sync) and features/daos/routes.py
-# (what GET /daos lists).
+# Read by features/proposals/fetch.py (what to sync), features/daos/routes.py
+# (what GET /daos lists) and features/chat/context.py (DAO names in questions).

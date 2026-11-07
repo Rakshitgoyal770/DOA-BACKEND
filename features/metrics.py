@@ -93,6 +93,22 @@ def winning_share_pct(scores_json: str | None, scores_total: float | None,
     return value if decimals is None else round(value, decimals)
 
 
+def winning_choice(choices_json: str | None, scores_json: str | None) -> str | None:
+    """
+    The name of the choice with the most voting power, or None.
+
+    Parameters (where they come from):
+        choices_json - proposals.choices_json, e.g. '["For", "Against"]'.
+        scores_json  - proposals.scores_json, voting power per choice in the same order.
+    """
+    if not choices_json or not scores_json:
+        return None
+    choices, scores = json.loads(choices_json), json.loads(scores_json)
+    if not choices or not scores:
+        return None
+    return choices[max(range(min(len(choices), len(scores))), key=lambda i: scores[i])]
+
+
 def decode_choice(choice_json: str | None, choices: list[str]):
     """
     Snapshot stores a vote's choice as numbers; return the same shape with names.
