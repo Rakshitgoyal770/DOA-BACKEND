@@ -5,7 +5,9 @@ vector/embedding.py — Keeps the ChromaDB search index in step with SQLite, tou
 What goes into the index (each item is a "document"):
   * proposal body chunks   id: proposal_<proposal_id>_<n>
   * forum posts            id: forum_post_<proposal_id>_<post_id>
-                           (a post is stored once per proposal linking its thread)
+                           (a post is stored once per proposal linking its thread).
+                           A post too long for one chunk is split (vector/chunking.py)
+                           and its chunks get ids forum_post_<proposal_id>_<post_id>_c<n>.
 
 For every document, a sync compares SQLite (what it should be) with Chroma
 (what it is) and picks the cheapest correct action:
@@ -32,7 +34,7 @@ import math
 from functools import lru_cache
 from pathlib import Path
 
-from vector.chunking import chunk_proposal_body
+from vector.chunking import FORUM_MAX_CHARS, PROPOSAL_MAX_CHARS, chunk_text
 
 MODEL_NAME = "BAAI/bge-small-en-v1.5"
 CHROMA_PATH = Path(__file__).resolve().parent.parent / "chroma_data"
@@ -61,16 +63,33 @@ def get_collection():
 
 # ── What the index SHOULD contain, built from SQLite ─────────────────────────
 
-def proposal_documents(conn) -> dict[str, tuple[str, dict]]:
+def token_counter(model):
     """
-    {doc_id: (text, metadata)} for every chunk of every proposal body.
+    The model's tokenizer as a function text -> number of tokens, or None if the model
+    has no tokenizer (the small fakes used in tests; chunking then uses characters only).
 
     Parameter (where it comes from):
-        conn - passed down from sync_index().
+        model - the embedding model (get_model(), or a test's fake), from sync_index().
+    """
+    tokenizer = getattr(model, "tokenizer", None)
+    if tokenizer is None:
+        return None
+    tokenizer.model_max_length = 10 ** 9          # we measure long texts on purpose; silence the warning
+    return lambda text: len(tokenizer(text, add_special_tokens=False)["input_ids"])
+
+
+def proposal_documents(conn, count_tokens=None) -> dict[str, tuple[str, dict]]:
+    """
+    {doc_id: (text, metadata)} for every chunk of every proposal body
+    (chunks of at most PROPOSAL_MAX_CHARS characters, see vector/chunking.py).
+
+    Parameters (where they come from — sync_index):
+        conn         - the open SQLite connection.
+        count_tokens - token_counter(model), so chunks also respect the token limit.
     """
     docs = {}
     for p in conn.execute("SELECT id, space_id, title, body FROM proposals"):
-        for i, text in enumerate(chunk_proposal_body(p["body"])):
+        for i, text in enumerate(chunk_text(p["body"], PROPOSAL_MAX_CHARS, count_tokens)):
             docs[f"proposal_{p['id']}_{i}"] = (text, {
                 "source_type": "proposal_body",
                 "proposal_id": p["id"],
@@ -80,16 +99,18 @@ def proposal_documents(conn) -> dict[str, tuple[str, dict]]:
     return docs
 
 
-def forum_documents(conn) -> dict[str, tuple[str, dict]]:
+def forum_documents(conn, count_tokens=None) -> dict[str, tuple[str, dict]]:
     """
-    {doc_id: (text, metadata)} for every non-empty forum post.
+    {doc_id: (text, metadata)} for every non-empty forum post. A post that fits in one
+    chunk (FORUM_MAX_CHARS) keeps the id forum_post_<proposal_id>_<post_id>; a longer one
+    becomes several documents ending _c0, _c1, ..., all carrying the same metadata.
 
     If the author is linked to a wallet, the metadata also carries the wallet,
     the link confidence, and the wallet's voting power on THIS proposal.
     Wallets are compared lower-case: Snapshot writes them in mixed case.
 
-    Parameter (where it comes from):
-        conn - passed down from sync_index().
+    Parameters (where they come from — sync_index): conn, and count_tokens as in
+    proposal_documents.
     """
     rows = conn.execute("""
         SELECT f.id, f.proposal_id, f.username, f.content,
@@ -109,7 +130,10 @@ def forum_documents(conn) -> dict[str, tuple[str, dict]]:
             metadata["confidence_level"] = r["confidence_level"]
         if r["vp"] is not None:
             metadata["voting_power"] = r["vp"]
-        docs[f"forum_post_{r['proposal_id']}_{r['id']}"] = (r["content"], metadata)
+        base_id = f"forum_post_{r['proposal_id']}_{r['id']}"
+        chunks = chunk_text(r["content"], FORUM_MAX_CHARS, count_tokens)
+        for i, text in enumerate(chunks):
+            docs[base_id if len(chunks) == 1 else f"{base_id}_c{i}"] = (text, dict(metadata))
     return docs
 
 
@@ -208,7 +232,8 @@ def sync_index(conn, collection=None, model=None, dry_run: bool = False) -> dict
     were embedded, had metadata updated, were deleted, or were unchanged.
 
     `collection` and `model` default to the real ones; tests pass small fakes.
-    The model is only loaded if something actually needs embedding.
+    The model is always loaded, because its tokenizer sets how large chunks may be
+    (a fake without a tokenizer means characters-only limits).
 
     Parameters (where they come from):
         conn       - opened by the command line below.
@@ -217,7 +242,9 @@ def sync_index(conn, collection=None, model=None, dry_run: bool = False) -> dict
         dry_run    - the --dry-run flag: report the plan, write nothing.
     """
     collection = collection if collection is not None else get_collection()
-    wanted = {**proposal_documents(conn), **forum_documents(conn)}
+    model = model if model is not None else get_model()
+    count_tokens = token_counter(model)
+    wanted = {**proposal_documents(conn, count_tokens), **forum_documents(conn, count_tokens)}
     current = indexed_documents(collection)
     plan = plan_changes(wanted, current)
 
@@ -226,7 +253,6 @@ def sync_index(conn, collection=None, model=None, dry_run: bool = False) -> dict
 
     if not dry_run:
         if plan["embed"]:
-            model = model if model is not None else get_model()
             for ids in _batches(plan["embed"], WRITE_BATCH_SIZE):
                 texts = [wanted[i][0] for i in ids]
                 vectors = model.encode(texts, batch_size=ENCODE_BATCH_SIZE)
