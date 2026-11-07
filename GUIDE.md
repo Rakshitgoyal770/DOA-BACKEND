@@ -32,8 +32,9 @@ The project answers questions about how DAOs govern, by joining two kinds of dat
 - **SQLite** holds the facts: every proposal, vote, forum post and link. Found by id.
 - **ChromaDB** holds the *text* (proposal paragraphs, forum posts) as vectors, so the chat
   can find passages by meaning. It is rebuilt from SQLite, never the other way round.
-- **The LLM never reads the database.** Our code reads SQL, turns the result into a few
-  lines of text, and puts them in the prompt next to the retrieved passages.
+- **The LLM never touches the database.** It can only *ask* for lookups by name
+  (`list_proposals`, `person`, `search_forum` …). Our code runs them on SQLite / ChromaDB and
+  sends the results back as text. It never writes SQL and never computes a number.
 
 ---
 
@@ -45,31 +46,44 @@ Example: `POST /chat {"query": "Why did people support it?", "proposal_id": "0xe
 |:-:|:---|:---|:---|:---|
 | 1 | [main.py](main.py) | — | The request matches the `/chat` router | → routes |
 | 2 | [features/chat/routes.py](features/chat/routes.py) | `chat` | Validates the body (`query` 3–2000 chars, `n_results` 1–20) | → `run_chat` |
-| 3 | [features/chat/service.py](features/chat/service.py) | `run_chat` | Runs steps 4–8 in order. **Same function the evaluation uses.** | answer + sources |
-| 4 | [features/chat/retrieval.py](features/chat/retrieval.py) | `retrieve` | Embeds the question, asks ChromaDB for the 5 nearest chunks *of this proposal*, drops any with distance > 0.7 | 5 chunks (text + metadata) |
-| 5 | [features/chat/context.py](features/chat/context.py) | `enrich_chunks` | For each forum post: author → wallet → that wallet's vote on this proposal (live SQL) | `chunk["sql"]` |
-| 6 | [features/chat/context.py](features/chat/context.py) | `collect_facts` | For each proposal behind the chunks (max 3): result, voters, posters, silence ratio, top-4 share | `facts` |
-| 7 | [features/metrics.py](features/metrics.py) | `top_voter_share`, `silence_ratio_pct`, … | The formulas used in step 6 (the **same** ones the endpoints use) | numbers |
-| 8 | [features/chat/prompt.py](features/chat/prompt.py) | `build_prompt` | Writes the system rules + facts block + numbered sources + question | 2 messages |
-| 9 | [features/chat/llm.py](features/chat/llm.py) | `generate` | Tries Groq → Gemini → OpenRouter until one answers | answer, provider |
+| 3 | [features/chat/service.py](features/chat/service.py) | `run_chat` | Two stages: gather the evidence, then write the answer. **Same function the terminal chat and the evaluation use.** | one answer + sources + lookups |
+| 4 | [features/chat/agent.py](features/chat/agent.py) | `gather_evidence` | **Stage 1.** Sends the question and the lookup descriptions to the LLM. The LLM replies "run `search_forum(...)`" (a request, not an answer); we run it and send the result back; repeat until it says `DONE` (max 6 rounds, max 2 forum searches). It never writes the answer. If the question asks for reasons or opinions and the model skipped the forum search, we run it ourselves (`automatic`). | evidence list |
+| 5 | [features/chat/llm.py](features/chat/llm.py) | `generate_with_tools` | One round of step 4: Groq, then Gemini, then Groq's small model (a separate daily quota) if one fails (waits ≤15 s for a rate limit; 45 s timeout) | the model's reply |
+| 6 | [features/chat/tools.py](features/chat/tools.py) | `run_tool` + 7 lookups | The lookups the LLM may request: `find_proposals`, `list_proposals`, `dao_stats`, `proposal_details`, `top_voters`, `person`, `search_forum`. Each reads SQLite / ChromaDB. A proposal the user selected is filled in when the model leaves it out. | raw results |
+| 7 | [features/chat/retrieval.py](features/chat/retrieval.py) | `retrieve` | Used by `search_forum`: embeds the query, asks ChromaDB for the nearest chunks, drops those too far away (0.7 anywhere, 0.85 inside one proposal, 1.0 for one author) | chunks |
+| 8 | [features/chat/context.py](features/chat/context.py) | `proposal_facts`, `author_context` | One proposal's numbers; a forum author's wallet and **how that wallet voted** (attached to every forum passage) | numbers, `chunk["sql"]` |
+| 9 | [features/metrics.py](features/metrics.py) | `top_voter_share`, `silence_ratio_pct`, … | The formulas behind the numbers (the **same** ones the endpoints use) | numbers |
+| 10 | [features/chat/prompt.py](features/chat/prompt.py) | `build_prompt` | **Stage 2.** Turns the evidence into the writer's prompt: system rules + `DATABASE FACTS` (one entry per lookup) + numbered sources + question | 2 messages |
+| 11 | [features/chat/llm.py](features/chat/llm.py) | `generate` | Tries Groq → Gemini → OpenRouter until one answers | the single final answer |
 
-**What the LLM actually receives (step 8):**
+**The two stages in one picture:**
 ```
-PROPOSAL FACTS (from the database):
-- Optimism Collective | "Season 2: Cycle 8: DefiLlama" | state: closed
-  result: For 91.7%; Against 1.4%; Abstain 6.9% (winner: For)
-  voters: 14194; forum posters: 12 (silence ratio 0.085%)
-  top 4 loaded voters hold 50.4% of total voting power
+STAGE 1  agent (gathers)                                    STAGE 2  writer (answers)
+question ──> LLM: "run list_proposals(...)"                 question + evidence
+             we run it on SQLite, send the result back  ──>  system rules (cite, [Background], advice)
+             LLM: "run search_forum(...)" ... "DONE"         one LLM call -> ONE answer
+```
+
+**Why not just search?** Vector search finds *similar text*; it cannot rank ("most voters"), count, or
+find "what griff voted". Those need SQL, so the LLM picks the lookup and our code computes the number.
+
+**What the writer actually receives (step 10):**
+```
+DATABASE FACTS (lookups run in the database for this question):
+- proposal_details(proposal_id=0xe97a...):
+  {"dao": "Optimism Collective", "title": "Season 2: Cycle 8: DefiLlama", "winning_choice": "For",
+   "total_voters": 14194, "forum_posters": 12, "silence_ratio_pct": 0.085, ...}
 
 Sources:
-[Source 1 - forum_post by OPUser (wallet link: low)] Glad to see you here...
+[Source 1 - forum_post by OPUser (voting power 9.0K, voted For, wallet link: high)] Glad to see you here...
 [Source 2 - proposal_body] This Governance Fund Phase 1 proposal is eligible...
 
 Question: Why did people support it?
 ```
 
-**If something goes wrong:** no chunk close enough → HTTP 404 and the LLM is *not* called ·
-invalid body → 422 · every LLM provider fails → 500.
+**If something goes wrong:** the question matches nothing or needs no lookup → still HTTP 200, the writer
+says it has no data (or gives `[Background]` knowledge) · invalid body → 422 · every LLM provider fails → 500 ·
+the LLM asks for a lookup that does not exist → it gets an error message and can retry.
 
 ---
 
@@ -118,12 +132,35 @@ page after page. No limit, and items sharing a second are not lost.
 | What the LLM is told | [features/chat/prompt.py](features/chat/prompt.py) `SYSTEM_PROMPT` | every answer |
 | Writing a wallet link (never weakens a stronger one) | [features/identity/common.py](features/identity/common.py) `upsert_identity` | every identity strategy |
 | What the search index should contain | [vector/embedding.py](vector/embedding.py) `sync_index` | index sync |
+| How text is split into chunks (sizes, why, where) | [vector/chunking.py](vector/chunking.py) | index sync, prompt |
 | Opening the database (and upgrading its schema) | [db/schema.py](db/schema.py) `get_connection` | everything |
 | Which DAOs we follow | [config/curated_daos.py](config/curated_daos.py) | proposal sync, `/daos` |
 
 Change a rule in its home and every user of it changes together.
 
 ---
+
+### Chunking: every strategy in use, why, and where
+
+The embedding model reads at most **512 tokens** per text and silently ignores the rest, so a long
+text must be cut into chunks or most of it can never be found. The full explanation is in the
+header of [vector/chunking.py](vector/chunking.py).
+
+| What | Strategy | Limit | Where |
+|:---|:---|:---|:---|
+| **Proposal body** | Pack whole paragraphs together; split a too-long paragraph by sentence | 1,500 characters | `vector/embedding.py` `proposal_documents` |
+| **Forum post** | A post that fits stays ONE chunk (id unchanged); a longer one is split by sentence | 1,200 characters | `vector/embedding.py` `forum_documents` |
+| **Both of the above** | A second limit counted in the model's own tokens, because URLs, tables and hashes use many tokens per character | 500 tokens | `vector/chunking.py` `chunk_text` |
+| **Prompt, per source** | Not chunking: a safety cut so one oversized source cannot push a request over the free LLM limit | 2,000 characters | `features/chat/prompt.py` `clip_source` |
+
+How a text is cut: paragraphs first, then sentences, then words (only for text with no sentence
+breaks, like a pasted table). Forum posts need the sentence level because our HTML cleaner removes all
+line breaks. There is **no overlap** between chunks (splits land on sentence ends). Every chunk of a post
+keeps the post's author and wallet. Ids: a post in one chunk keeps `forum_post_<proposal>_<post>`; a split
+post becomes `..._c0`, `..._c1`, … (the evaluation counts any chunk as its post).
+
+Before this was added, 17% of forum posts were longer than the limit and **46.8% of all forum text was
+invisible to search**.
 
 ## 5. The database at a glance
 
@@ -150,6 +187,7 @@ spaces ─< proposals ─< votes (voter wallet)
 | I want to… | Run |
 |:---|:---|
 | Start the API (docs at `/docs`) | `uvicorn main:app --reload --port 8000` |
+| **Chat with the project in the terminal** | `python -m features.chat.cli` (then `/find`, `/use`, `/lookups`, `/sources`, `/help`; it prints each lookup as the agent runs it) |
 | See what data we have / what's missing | `python -m features.sync.runner --check` |
 | Bring all data up to date | `python -m features.sync.runner --sync-all` |
 | Backfill many votes or threads | `--fetch-votes --limit 200` · `--fetch-forum --limit 200` |
@@ -177,8 +215,10 @@ provider problem, not a wrong answer: the report keeps errors out of the pass ra
 | I want to change… | Open | Then |
 |:---|:---|:---|
 | How the assistant answers (tone, citations, advice) | `features/chat/prompt.py` → `SYSTEM_PROMPT` | `python -m eval.eval_harness` |
-| How many / how close chunks are retrieved | `features/chat/retrieval.py` → `max_distance`, `n_results` | evaluate |
-| Which numbers go into the facts block | `features/chat/context.py` → `proposal_facts`, `format_facts` | tests |
+| **Which lookups the LLM can use, or when it picks which** | `features/chat/tools.py` → `TOOLS` (descriptions are the instructions), `features/chat/agent.py` → `FETCHER_PROMPT` | evaluate |
+| A new lookup (e.g. "votes by a wallet across DAOs") | `features/chat/tools.py` → write it, add to `FUNCTIONS` and `TOOLS` | `tests/test_tools.py` |
+| How close a passage must be to count | `features/chat/tools.py` → `MAX_DISTANCE_*` | evaluate |
+| Which numbers one proposal's facts contain | `features/chat/context.py` → `proposal_facts` | tests |
 | A formula (silence ratio, whale share, …) | `features/metrics.py` | `python -m pytest` (pins the values) |
 | The LLM providers or their order | `features/chat/llm.py` → `PROVIDERS` | `python -m features.chat.llm` |
 | Which DAOs we follow | `config/curated_daos.py` | `--sync-all` |
@@ -198,10 +238,13 @@ provider problem, not a wrong answer: the report keeps errors out of the pass ra
 | **vp (voting power)** | How much weight a wallet's vote carries (usually tokens held or delegated) |
 | **Silence ratio** | Forum posters ÷ voters, as %: how few voters explain themselves |
 | **Top-4 share** | Share of all voting power held by the 4 biggest wallets: whale concentration |
-| **Chunk** | A piece of text stored in ChromaDB (a proposal paragraph block or one forum post) |
-| **Distance** | How far a chunk's meaning is from the question; lower is closer; kept if ≤ 0.7 |
+| **Chunk** | A piece of text stored in ChromaDB: a block of proposal paragraphs, or a forum post (or part of a long one) |
+| **Distance** | How far a chunk's meaning is from the query; lower is closer. A descriptive sentence scores about 0.45-0.6, one keyword 0.7-0.95 |
 | **RAG** | Retrieval-Augmented Generation: find relevant text first, then let the LLM answer from it |
-| **Facts block** | The SQL numbers written into the prompt above the sources |
+| **Tool calling** | The LLM replies with a *request* ("run `person(name=griff)`"); our code runs it and returns the result. The LLM never runs anything itself |
+| **Agent / evidence** | Stage 1: the LLM that picks the lookups, and the list of lookups with their results that it collects |
+| **Writer** | Stage 2: the single LLM call that writes the final answer from the evidence, under the answer rules |
+| **DATABASE FACTS** | The lookup results (JSON) written into the writer's prompt above the sources |
 | **[Background]** | Marks a sentence the model wrote from its own general knowledge (allowed for concepts, never for numbers, results or who voted). Excluded from the faithfulness score; tracked as *background share* |
 | **Link confidence** | How sure a wallet ↔ username link is: low · medium · high (wallet voted in that DAO) · certain (hand-verified) |
 | **Complete / partial / missing** | Whether we store all, some or none of what the source says exists |

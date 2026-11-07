@@ -29,8 +29,9 @@ features/
   daos/                    routes.py  service.py
   sync/                    routes.py  audit.py  runner.py (CLI: python -m features.sync.runner)
   identity/                routes.py  runner.py  stats.py  common.py  strategies/*
-  chat/                    routes.py  service.py (run_chat: the pipeline)  retrieval.py
-                           context.py  prompt.py  llm.py
+  chat/                    routes.py  service.py (run_chat: gather evidence, then write)
+                           agent.py (stage 1)  tools.py (the 7 lookups)  retrieval.py
+                           context.py  prompt.py (stage 2)  llm.py  cli.py (terminal chat)
 vector/                    chunking.py  embedding.py (ChromaDB index, incremental)
 eval/                      RAG evaluation harness (uses run_chat, like the API)
 tests/                     offline tests + regression checks on the real database
@@ -49,7 +50,8 @@ flowchart LR
     Resolve["Identity resolution<br/>features/identity/runner.py"]
     Embed["Embedding/indexing<br/>vector/embedding.py"]
     Chroma[("ChromaDB<br/>chroma_data/")]
-    Retrieve["Retrieve + prompt assembly<br/>features/chat/retrieval.py"]
+    Agent["Stage 1: agent picks lookups<br/>features/chat/agent.py + tools.py"]
+    Writer["Stage 2: writer prompt<br/>features/chat/prompt.py"]
     LLM["LLM providers<br/>features/chat/llm.py"]
     Response["JSON response"]
 
@@ -61,11 +63,12 @@ flowchart LR
     Resolve -->|"resolved wallet + voting power metadata"| Embed
     Embed --> Chroma
     App -->|"GET /daos, /proposals"| SQLite
-    App -->|"POST /chat"| Retrieve
-    Chroma --> Retrieve
-    Retrieve --> LLM
+    App -->|"POST /chat"| Agent
+    Agent -->|"lookups"| SQLite
+    Agent -->|"search_forum"| Chroma
+    Agent -->|"evidence"| Writer
+    Writer --> LLM
     LLM --> Response
-    SQLite --> Response
     Response --> Client
 ```
 
@@ -77,7 +80,7 @@ flowchart LR
 | Database initialization | [`db/schema.py`](./db/schema.py) | Creates tables, indexes, and per-request SQLite connections. |
 | DAO endpoints | [`features/daos/routes.py`](./features/daos/routes.py) | Reads `spaces`, `proposals`, and `forum_posts` to return DAO summaries and top-proposal statistics. |
 | Proposal endpoints | [`features/proposals/routes.py`](./features/proposals/routes.py) | Reads proposal, vote, and forum data; computes silence and voting-power concentration metrics. |
-| Chat endpoint | [`features/chat/routes.py`](./features/chat/routes.py) | Validates the request, invokes retrieval and answer generation, and returns cited source chunks. |
+| Chat endpoint | [`features/chat/routes.py`](./features/chat/routes.py) | Validates the request, runs the two-stage chat pipeline, and returns the answer with its source passages and the lookups made. |
 | Sync endpoints | [`features/sync/routes.py`](./features/sync/routes.py) | Exposes collection audits and full incremental synchronization. |
 
 ## 2. External-data ingestion flow
@@ -224,51 +227,79 @@ flowchart LR
   incrementally: new or edited text is embedded, metadata-only changes are
   updated without embedding, removed rows are deleted, everything else is
   skipped (`python -m vector.embedding [--dry-run]`).
-- Proposal documents are split by
-  [`vector/chunking.py`](./vector/chunking.py); forum posts are indexed as
-  individual documents.
+- Both proposal bodies and forum posts are split by
+  [`vector/chunking.py`](./vector/chunking.py) so no chunk exceeds the embedding
+  model's 512-token limit (proposals: paragraphs packed to 1,500 characters;
+  forum posts: split by sentence to 1,200 characters when they do not fit; both
+  also capped at 500 tokens). A post that fits keeps its single document; a
+  longer one becomes several (`_c0`, `_c1`, ...). See the header of that file for the reasoning.
 - Forum metadata can include `resolved_wallet`, `confidence_level`, and
   proposal-specific `voting_power`.
 
 ## 5. `POST /chat` query flow
 
+The pipeline has two stages and produces ONE answer. The LLM never touches the database: in
+stage 1 it can only *request* lookups by name; our code runs them.
+
 ```mermaid
 sequenceDiagram
     participant C as Client
     participant R as features/chat/routes.py
-    participant A as features/chat/retrieval.py
-    participant V as vector/embedding.py
-    participant DB as ChromaDB
+    participant S as features/chat/service.py
+    participant G as features/chat/agent.py
     participant L as features/chat/llm.py
+    participant T as features/chat/tools.py
+    participant D as SQLite + ChromaDB
+    participant P as features/chat/prompt.py
 
     C->>R: POST /chat {query, proposal_id?, n_results}
-    R->>R: Validate ChatRequest
-    R->>A: retrieve(query, n_results, where)
-    A->>V: model.encode(query)
-    V-->>A: query embedding
-    A->>DB: collection.query(embedding, where)
-    DB-->>A: documents, metadata, distances, ids
-    A->>A: Filter distance <= 0.70
-    A-->>R: relevant chunks
-    R->>A: answer_question(query, chunks)
-    A->>A: build_prompt() with source citations
-    A->>L: generate(messages)
-    L-->>A: answer + provider
-    A-->>R: answer + provider
-    R-->>C: ChatResponse with answer and source metadata
+    R->>S: run_chat(query, proposal_id, n_results)
+    Note over S,D: STAGE 1 - gather the evidence
+    S->>G: gather_evidence()
+    loop until DONE (max 6 rounds, max 2 forum searches)
+        G->>L: generate_with_tools(messages, TOOLS)
+        L-->>G: "run list_proposals(...)" (a request, not an answer)
+        G->>T: run_tool(name, arguments)
+        T->>D: SQL query / vector search
+        D-->>T: rows / chunks
+        T-->>G: raw result (also shortened for the agent)
+    end
+    G-->>S: evidence = [lookup, arguments, result, ...]
+    Note over S,P: STAGE 2 - write the answer
+    S->>P: build_prompt(query, evidence)
+    P-->>S: system rules + DATABASE FACTS + numbered sources + question
+    S->>L: generate(messages)
+    L-->>S: answer + provider
+    S-->>R: answer, provider, chunks, evidence
+    R-->>C: ChatResponse (answer, sources, lookups)
 ```
 
 Important behavior:
 
-1. An optional `proposal_id` becomes a Chroma metadata filter.
-2. Retrieval requests up to `n_results` chunks and removes chunks whose
-   distance is greater than `0.7`.
-3. If no chunks remain, [`features/chat/routes.py`](./features/chat/routes.py) returns
-   HTTP 404 rather than calling an LLM without context.
-4. [`features/chat/llm.py`](./features/chat/llm.py) tries providers in this
-   order: Groq, Gemini, then OpenRouter.
-5. The response preserves the retrieved document, source type, proposal ID,
-   author, voting power, and distance for traceability.
+1. The seven lookups ([`features/chat/tools.py`](./features/chat/tools.py)): `find_proposals`,
+   `list_proposals`, `dao_stats`, `proposal_details`, `top_voters`, `person`, `search_forum`.
+   Numbers come from the same code as the API endpoints ([`features/metrics.py`](./features/metrics.py)).
+2. If the user selected a proposal (`proposal_id`), lookups that take one use it whenever the model
+   leaves it out.
+3. `search_forum` embeds the query and asks ChromaDB for the nearest chunks. A passage is dropped when
+   its distance exceeds 0.7 (searching everywhere), 0.85 (inside one proposal) or 1.0 (one author's
+   posts). Every forum passage comes with its author's wallet and how that wallet voted.
+4. The agent may run at most 6 rounds and 2 forum searches, and a repeated lookup is skipped.
+   **Safety net:** if the question asks for reasons or opinions (why, argued, concerns, said, feel, what
+   a proposal asks for ...) and the agent ran no forum search, `gather_evidence` runs one itself with
+   the question as written (4 passages, inside the selected proposal when there is one). It is marked
+   `automatic` in the evidence and in `/lookups`. Counts ("how many ...") never trigger it, and a
+   distance or reranker score is not used as the trigger (tested: it passed passages for number
+   questions and blocked on-topic ones).
+5. Counts (voters, forum posters) come from `proposal_details` / `dao_stats`, never from counting passages.
+6. Providers for the agent: Groq, Gemini (given earlier lookups as plain text, because it rejects tool-call
+   history written by another model), then Groq's small model (its own daily quota), then an OpenRouter free
+   model (small daily limit, the writer needs it too). The writer tries Groq, Gemini, then OpenRouter. A rate limit that clears
+   within 15 seconds is waited out; a request that takes over 45 seconds fails over.
+7. A question that matches nothing is still answered (HTTP 200): the writer says the data is not there,
+   or gives general background marked `[Background]`.
+8. The response carries the answer, the source passages (document, type, proposal, author, wallet,
+   voting power, vote, distance) and `lookups` (what was asked of the database and what came back).
 
 ## 6. Structured analytics flow
 
@@ -306,9 +337,11 @@ flowchart TD
 | Snapshot spaces/proposals/votes | [`clients/snapshot.py`](./clients/snapshot.py), [`features/sync/runner.py`](./features/sync/runner.py) |
 | Discourse threads/posts | [`clients/discourse.py`](./clients/discourse.py), [`features/forum/fetch.py`](./features/forum/fetch.py) |
 | Identity matching | [`features/identity/runner.py`](./features/identity/runner.py) |
-| Proposal chunking and embeddings | [`vector/chunking.py`](./vector/chunking.py), [`vector/embedding.py`](./vector/embedding.py) |
-| Vector retrieval and prompt assembly | [`features/chat/retrieval.py`](./features/chat/retrieval.py) |
-| LLM fallback routing | [`features/chat/llm.py`](./features/chat/llm.py) |
+| Chunking (all strategies) and embeddings | [`vector/chunking.py`](./vector/chunking.py), [`vector/embedding.py`](./vector/embedding.py) |
+| Stage 1: the agent and its lookups | [`features/chat/agent.py`](./features/chat/agent.py), [`features/chat/tools.py`](./features/chat/tools.py) |
+| Vector retrieval (used by `search_forum`) | [`features/chat/retrieval.py`](./features/chat/retrieval.py) |
+| Stage 2: the writer's prompt | [`features/chat/prompt.py`](./features/chat/prompt.py) |
+| LLM fallback routing and tool calling | [`features/chat/llm.py`](./features/chat/llm.py) |
 | DAO analytics | [`features/daos/routes.py`](./features/daos/routes.py) |
 | Proposal analytics | [`features/proposals/routes.py`](./features/proposals/routes.py) |
 | Natural-language Q&A | [`features/chat/routes.py`](./features/chat/routes.py) |
