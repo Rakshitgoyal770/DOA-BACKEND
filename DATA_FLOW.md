@@ -284,6 +284,10 @@ Important behavior:
 3. `search_forum` embeds the query and asks ChromaDB for the nearest chunks. A passage is dropped when
    its distance exceeds 0.7 (searching everywhere), 0.85 (inside one proposal) or 1.0 (one author's
    posts). Every forum passage comes with its author's wallet and how that wallet voted.
+   Every chunk carries its `proposal_id`, so a search can be limited to one proposal (`where proposal_id`,
+   no leaks: tested on all 118) or to one DAO (`proposal_id $in` that DAO's ids: forum chunks have no DAO
+   field). Searches over everything mix proposals, so each passage header shown to the writer names its
+   proposal, and identical texts stored under several proposals (shared forum threads) count as one passage.
 4. The agent may run at most 6 rounds and 2 forum searches, and a repeated lookup is skipped.
    **Safety net:** if the question asks for reasons or opinions (why, argued, concerns, said, feel, what
    a proposal asks for ...) and the agent ran no forum search, `gather_evidence` runs one itself with

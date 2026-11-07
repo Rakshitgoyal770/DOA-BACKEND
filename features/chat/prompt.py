@@ -167,21 +167,29 @@ def split_evidence(evidence: list[dict]) -> tuple[list[dict], list[dict]]:
     """
     (passages, fact entries) from the agent's evidence.
 
-    Passages are the chunks of every forum search that found something: de-duplicated by id,
-    closest first, at most MAX_SOURCES. Fact entries are every other lookup, plus searches
-    that found nothing (so the writer can say that nothing was found).
+    Passages are the chunks of every forum search that found something: de-duplicated, closest
+    first, at most MAX_SOURCES. Two chunks with the same text count as one: a forum thread shared
+    by several proposals is stored once per proposal, and an unscoped search would otherwise fill
+    its slots with copies. Of such copies the one from the proposal the search was scoped to is
+    kept (its author's vote then refers to the right proposal), else the first found. Fact
+    entries are every other lookup, plus searches that found nothing (so the writer can say that
+    nothing was found).
 
     Parameter (where it comes from): the list gather_evidence() returned, via run_chat().
     """
-    chunks, entries = {}, []
+    chunks, entries = {}, []                       # chunks: (type, text) -> (scoped?, chunk)
     for e in evidence:
         found = e["result"].get("chunks") if e["tool"] == "search_forum" and isinstance(e["result"], dict) else None
         if found:
+            scope = (e.get("arguments") or {}).get("proposal_id")
             for c in found:
-                chunks.setdefault(c["id"], c)
+                key = (c["metadata"].get("source_type"), c["document"])
+                scoped = bool(scope) and c["metadata"].get("proposal_id") == scope
+                if key not in chunks or (scoped and not chunks[key][0]):
+                    chunks[key] = (scoped, c)
         else:
             entries.append(e)
-    return sorted(chunks.values(), key=lambda c: c["distance"])[:MAX_SOURCES], entries
+    return sorted((c for _, c in chunks.values()), key=lambda c: c["distance"])[:MAX_SOURCES], entries
 
 
 def format_facts(entries: list[dict]) -> str:

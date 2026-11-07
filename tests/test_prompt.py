@@ -20,9 +20,10 @@ def search_entry(*chunks):
     return {"tool": "search_forum", "arguments": {"query": "why"}, "result": {"chunks": list(chunks)}}
 
 
-def passage(cid, distance=0.3, text="I support this.", author="carol"):
-    return {"id": cid, "document": text, "distance": distance,
-            "metadata": {"source_type": "forum_post", "proposal_id": "P", "author": author}}
+def passage(cid, distance=0.3, text=None, author="carol", proposal="P"):
+    """A found passage; its text differs per id unless given (identical texts count as one passage)."""
+    return {"id": cid, "document": text or f"I support this ({cid}).", "distance": distance,
+            "metadata": {"source_type": "forum_post", "proposal_id": proposal, "author": author}}
 
 
 # ── the rules in the system prompt ───────────────────────────────────────────
@@ -118,6 +119,25 @@ def test_passages_are_deduplicated_closest_first_and_capped():
     assert [c["id"] for c in chunks][:2] == ["b", "x0"]               # nearest first
     assert len({c["id"] for c in chunks}) == len(chunks) == MAX_SOURCES   # no duplicates, capped
     assert entries == []
+
+
+def test_the_same_text_stored_under_two_proposals_is_one_passage():
+    """A forum thread shared by two proposals is indexed twice; an unscoped search returned both copies."""
+    copy_a = passage("forum_post_A_1", 0.3, text="Same thread post.", proposal="A")
+    copy_b = passage("forum_post_B_1", 0.3, text="Same thread post.", proposal="B")
+    other = passage("other", 0.4)
+    chunks, _ = split_evidence([search_entry(copy_a, copy_b, other)])
+    assert [c["id"] for c in chunks] == ["forum_post_A_1", "other"]          # first copy kept, no repeat
+
+
+def test_of_two_identical_passages_the_one_from_the_scoped_proposal_is_kept():
+    """Its author's vote then refers to the proposal the user asked about, not to the other copy."""
+    copy_a = passage("forum_post_A_1", 0.3, text="Same thread post.", proposal="A")
+    copy_b = passage("forum_post_B_1", 0.3, text="Same thread post.", proposal="B")
+    unscoped = search_entry(copy_a)
+    scoped = {"tool": "search_forum", "arguments": {"query": "why", "proposal_id": "B"}, "result": {"chunks": [copy_b]}}
+    chunks, _ = split_evidence([unscoped, scoped])
+    assert [c["id"] for c in chunks] == ["forum_post_B_1"]
 
 
 def test_a_search_that_found_nothing_is_reported_as_a_fact():
@@ -216,3 +236,20 @@ def test_the_prompt_stays_small_even_with_a_huge_source():
     hugest = [search_entry(dict(huge, id=f"c{i}")) for i in range(5)]
     user = build_prompt("Why?", hugest + FACTS)[1]["content"]
     assert len(user) < 5 * 2200 + 1500                           # 5 capped sources + facts + question
+
+
+# ── the writer can see which proposal a passage belongs to ───────────────────
+
+def test_each_source_header_names_its_proposal():
+    """Unscoped searches mix proposals; without the title the writer could pin a passage on the wrong one."""
+    chunk = passage("c1")
+    chunk["proposal_title"] = "Frozen ETH"
+    user = build_prompt("Who argued against?", [search_entry(chunk)])[1]["content"]
+    assert 'Source 1 - forum_post by carol (wallet unknown), on proposal "Frozen ETH"' in user
+
+
+def test_a_proposal_text_chunk_falls_back_to_the_title_in_the_index():
+    from features.chat.context import source_label
+    chunk = {"id": "p", "document": "x", "distance": 0.2,
+             "metadata": {"source_type": "proposal_body", "proposal_id": "P", "title": "DefiLlama grant"}}
+    assert source_label(1, chunk) == 'Source 1 - proposal_body, on proposal "DefiLlama grant"'

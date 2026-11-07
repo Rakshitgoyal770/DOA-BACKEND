@@ -249,15 +249,25 @@ def person(conn, name: str, proposal_id: str | None = None) -> dict:
 
 
 def search_forum(conn, query: str, proposal_id: str | None = None, author: str | None = None, n: int = 5,
-                 source_type: str | None = None) -> dict:
+                 source_type: str | None = None, dao: str | None = None) -> dict:
     """
     Passages (forum posts and proposal text) closest in meaning to the query, optionally
-    limited to one proposal, one author and/or one kind of text ("proposal_body" = the proposal's own
-    text, "forum_post"). Returns {"chunks": [...]}: the chunks of
+    limited to one proposal, one DAO, one author and/or one kind of text ("proposal_body" = the
+    proposal's own text, "forum_post"). A DAO limits the search to the passages of that DAO's
+    proposals (the index has no DAO field on forum chunks, so we filter on the DAO's proposal ids);
+    it is ignored when a proposal is given, since the proposal is narrower. Returns {"chunks": [...]}: the chunks of
     features/chat/retrieval.py, each with "sql" (the author's wallet, link confidence, vote
     and voting power on that proposal) and "proposal_title".
     """
     filters = [{"proposal_id": proposal_id}] if proposal_id else []
+    if dao and not proposal_id:
+        space = resolve_dao(dao)
+        if not space:
+            return {"error": f"'{dao}' is not one of our DAOs ({', '.join(d['name'] for d in CURATED_DAOS)})."}
+        ids = [r[0] for r in conn.execute("SELECT id FROM proposals WHERE space_id = ?", (space,))]
+        if not ids:
+            return {"chunks": [], "note": f"we hold no proposals of {DAO_NAMES[space]}"}
+        filters.append({"proposal_id": {"$in": ids}})
     if source_type:
         filters.append({"source_type": source_type})
     if author:
@@ -332,6 +342,8 @@ TOOLS = [
                      "names the subject, e.g. 'Why did delegates support the DefiLlama grant proposal?'. "
                      "Never single keywords: they match poorly."},
            "proposal_id": _PID_ARG,
+           "dao": {"type": "string", "description": "Only passages of this DAO's proposals, e.g. 'arbitrum'. "
+                                                    "Use it when the question is about one DAO but no single proposal."},
            "author": {"type": "string", "description": "Only posts by this forum username."},
            "source_type": {"type": "string", "enum": ["proposal_body", "forum_post"],
                            "description": "proposal_body = the proposal's own text (what it asks for); "

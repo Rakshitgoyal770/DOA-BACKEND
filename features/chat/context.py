@@ -156,11 +156,15 @@ def enrich_chunks(conn, chunks: list[dict]) -> list[dict]:
 def source_label(i: int, c: dict) -> str:
     """
     The header line of one source in the prompt, e.g.
-    'Source 2 - forum_post by Zeptimus (zeptimus.eth, voting power 1.2M, voted For, wallet link: high)'.
+    'Source 2 - forum_post by Zeptimus (zeptimus.eth, voting power 1.2M, voted For, wallet link: high), on proposal "Frozen ETH"'.
+    The proposal title is there because a search across all proposals mixes them: without it the
+    writer cannot tell which proposal a passage (and its author's vote) belongs to.
 
     Parameters (where they come from):
         i - the source number (1-based), from build_prompt's loop in features/chat/prompt.py.
-        c - one chunk after enrich_chunks() (so c["sql"] may hold the author's on-chain data).
+        c - one chunk after enrich_chunks() (so c["sql"] may hold the author's on-chain data);
+            c["proposal_title"] is set by tools.search_forum (proposal-text chunks also carry
+            their own title in the index metadata).
     """
     meta, sql = c["metadata"], c.get("sql") or {}
     label = f"Source {i} - {meta.get('source_type')}"
@@ -178,6 +182,9 @@ def source_label(i: int, c: dict) -> str:
             label += f" ({', '.join(bits)})"
         else:
             label += " (wallet unknown)"
+    title = c.get("proposal_title") or meta.get("title")
+    if title:
+        label += f', on proposal "{title}"'
     return label
 
 

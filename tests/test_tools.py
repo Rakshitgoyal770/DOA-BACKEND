@@ -225,6 +225,36 @@ def test_search_filters_by_proposal_and_author(db, monkeypatch):
     assert calls[2]["n"] == 8                                                          # bounded
 
 
+def test_search_can_be_limited_to_one_dao_through_its_proposal_ids(db, monkeypatch):
+    """Forum chunks carry no DAO field, so 'Arbitrum only' is a filter on that DAO's proposal ids."""
+    add_proposal(db, "A1", space_id=ARB)
+    add_proposal(db, "A2", space_id=ARB)
+    add_proposal(db, "O1", space_id=OPT)
+    calls = []
+    monkeypatch.setattr(tools, "retrieve", fake_retrieve(calls, []))
+    tools.search_forum(db, "treasury risks", dao="Arbitrum DAO")
+    where = calls[0]["where"]["proposal_id"]
+    assert sorted(where["$in"]) == ["A1", "A2"]                          # nothing of Optimism
+    assert calls[0]["max_distance"] == tools.MAX_DISTANCE_ANYWHERE
+    tools.search_forum(db, "treasury risks", dao="arbitrum", source_type="forum_post")
+    assert calls[1]["where"]["$and"][1] == {"source_type": "forum_post"}
+
+
+def test_a_selected_proposal_wins_over_a_dao(db, monkeypatch):
+    add_proposal(db, "A1", space_id=ARB)
+    calls = []
+    monkeypatch.setattr(tools, "retrieve", fake_retrieve(calls, []))
+    tools.search_forum(db, "why", proposal_id="A1", dao="optimism")
+    assert calls[0]["where"] == {"proposal_id": "A1"}
+
+
+def test_an_unknown_dao_is_an_error_the_model_can_read(db, monkeypatch):
+    monkeypatch.setattr(tools, "retrieve", fake_retrieve([], []))
+    assert "not one of our DAOs" in tools.search_forum(db, "why", dao="some other dao")["error"]
+    add_proposal(db, "O1", space_id=OPT)
+    assert "no proposals of" in tools.search_forum(db, "why", dao="arbitrum")["note"]
+
+
 def test_the_distance_cutoff_is_loosest_where_the_search_is_already_narrow(db, monkeypatch):
     """One keyword scores 0.72-0.95 against a proposal's posts: a global 0.7 cutoff said 'no discussion'."""
     assert tools.MAX_DISTANCE_ANYWHERE < tools.MAX_DISTANCE_ONE_PROPOSAL < tools.MAX_DISTANCE_ONE_AUTHOR
