@@ -1,43 +1,27 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.pyo
-*.pyd
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
 
-# Virtual Environment
-.venv/
-venv/
-ENV/
-env/
+node_modules
+dist
+dist-ssr
+*.local
 
-# Environment secrets
-.env
-
-# Database (large binary — re-ingest locally)
-db/*.db
-
-# ChromaDB vector index (re-embed locally)
-chroma_data/
-
-# IDE
-.vscode/
-.idea/
-*.sublime-project
-
-# OS
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
 .DS_Store
-Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
 
-# Build artifacts
-*.egg-info/
-dist/
-build/
-
-# Test cache
-.pytest_cache/
-.coverage
-htmlcov/
-
-# Saved evaluation runs (generated output)
-eval/results/
+# TypeScript build cache
+*.tsbuildinfo

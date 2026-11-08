@@ -1,0 +1,335 @@
+@import "tailwindcss";
+@import './designTokens.css';
+
+@source "../**/*.{js,ts,jsx,tsx}";
+
+@theme {
+  --font-display: 'Instrument Serif', 'Newsreader', Georgia, serif;
+  --font-serif: 'Newsreader', Georgia, serif;
+  --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+
+  --color-ivory-50: #FAF8F5;
+  --color-ivory-100: #F4F0E8;
+  --color-ivory-200: #EBE5DA;
+  --color-charcoal-900: #181715;
+  --color-charcoal-800: #262523;
+  --color-charcoal-700: #4A463F;
+  --color-charcoal-500: #7D776E;
+}
+
+/* Base Document Styles
+   NOTE: no `* { margin: 0; padding: 0 }` reset here. Tailwind's preflight already resets
+   these inside a cascade layer, and an *unlayered* reset beats every Tailwind spacing
+   utility (p-*, m-*, space-*), which silently flattened the whole UI. */
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto !important;
+  }
+  .animate-fade-in {
+    animation: none;
+  }
+}
+
+html {
+  font-family: var(--font-sans);
+  background-color: var(--bg-app);
+  color: var(--text-primary);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--bg-app);
+  color: var(--text-primary);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* Typography Utility Classes */
+.font-display {
+  font-family: var(--font-display);
+}
+
+.font-serif {
+  font-family: var(--font-serif);
+}
+
+.font-sans {
+  font-family: var(--font-sans);
+}
+
+.font-mono {
+  font-family: var(--font-mono);
+  font-feature-settings: 'tnum' on, 'zero' on;
+}
+
+/* Editorial Headline Typography */
+.editorial-hero-title {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: -0.025em;
+  line-height: 0.90;
+  color: var(--text-primary);
+}
+
+.editorial-headline {
+  font-family: var(--font-serif);
+  font-weight: 500;
+  letter-spacing: -0.015em;
+  line-height: 1.05;
+  color: var(--text-primary);
+}
+
+.editorial-subhead {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-weight: 400;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.editorial-label {
+  font-family: var(--font-sans);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+/* Global Content Container System (Single Source of Truth) */
+.quorum-container {
+  width: 100%;
+  max-width: 1440px;
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: 1.25rem;
+  padding-right: 1.25rem;
+}
+
+@media (min-width: 640px) {
+  .quorum-container {
+    padding-left: 2rem;
+    padding-right: 2rem;
+  }
+}
+
+@media (min-width: 768px) {
+  .quorum-container {
+    padding-left: 2.5rem;
+    padding-right: 2.5rem;
+  }
+}
+
+@media (min-width: 1024px) {
+  .quorum-container {
+    padding-left: 3.5rem;
+    padding-right: 3.5rem;
+  }
+}
+
+@media (min-width: 1280px) {
+  .quorum-container {
+    padding-left: 4.5rem;
+    padding-right: 4.5rem;
+  }
+}
+
+/* Architectural Surfaces & Borders */
+.surface-card {
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-subtle);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition-fast);
+}
+
+.surface-card:hover {
+  border-color: var(--border-default);
+  box-shadow: var(--shadow-card);
+}
+
+.surface-elevated {
+  background-color: var(--bg-surface-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-elevated);
+}
+
+.surface-subtle {
+  background-color: var(--bg-surface-subtle);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.surface-inset {
+  background-color: var(--bg-surface-inset);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+/* Grid & Border Utilities */
+.border-fine-t {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.border-fine-b {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.border-fine-l {
+  border-left: 1px solid var(--border-subtle);
+}
+
+.border-fine-r {
+  border-right: 1px solid var(--border-subtle);
+}
+
+/* Minimal Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-surface-subtle);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-tertiary);
+}
+
+/* Animation Keyframes */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Markdown Reader Typography */
+.prose-editorial {
+  font-family: var(--font-serif);
+  font-size: 1.05rem;
+  line-height: 1.75;
+  color: var(--text-primary);
+}
+
+.prose-editorial p {
+  margin-bottom: 1.25rem;
+}
+
+.prose-editorial h2 {
+  font-family: var(--font-sans);
+  font-size: 1.15rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-top: 2rem;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+}
+
+.prose-editorial h3 {
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  font-weight: 600;
+  margin-top: 1.5rem;
+  margin-bottom: 0.5rem;
+  color: var(--text-primary);
+}
+
+.prose-editorial ul, .prose-editorial ol {
+  margin-left: 1.5rem;
+  margin-bottom: 1.25rem;
+}
+
+.prose-editorial ul {
+  list-style: disc;
+}
+
+.prose-editorial ol {
+  list-style: decimal;
+}
+
+.prose-editorial a {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.prose-editorial li {
+  margin-bottom: 0.4rem;
+}
+
+.prose-editorial code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background-color: var(--bg-surface-subtle);
+  padding: 0.15rem 0.35rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+}
+
+.prose-editorial blockquote {
+  border-left: 2px solid var(--border-strong);
+  padding-left: 1rem;
+  font-style: italic;
+  color: var(--text-secondary);
+  margin: 1.25rem 0;
+}
+
+/* The proposal's own text (components/proposal/ProposalBody.tsx): markdown written on Snapshot. */
+.proposal-markdown {
+  font-family: var(--font-serif);
+  font-size: 1.02rem;
+  line-height: 1.75;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.proposal-markdown > * + * { margin-top: 1rem; }
+.proposal-markdown h1, .proposal-markdown h2, .proposal-markdown h3, .proposal-markdown h4 {
+  font-family: var(--font-sans);
+  font-weight: 650;
+  line-height: 1.3;
+  color: #181715;
+  margin-top: 1.9rem;
+}
+.proposal-markdown h1 { font-size: 1.45rem; }
+.proposal-markdown h2 { font-size: 1.2rem; }
+.proposal-markdown h3 { font-size: 1.05rem; }
+.proposal-markdown h4 { font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.proposal-markdown > :first-child { margin-top: 0; }
+.proposal-markdown ul { list-style: disc; padding-left: 1.4rem; }
+.proposal-markdown ol { list-style: decimal; padding-left: 1.4rem; }
+.proposal-markdown li + li { margin-top: 0.3rem; }
+.proposal-markdown li > ul, .proposal-markdown li > ol { margin-top: 0.3rem; }
+.proposal-markdown a { color: #164054; text-decoration: underline; text-underline-offset: 2px; }
+.proposal-markdown blockquote { border-left: 3px solid #DDD5C7; padding-left: 1rem; color: #4A463F; }
+.proposal-markdown code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.85em; background: #F4F0E8; padding: 0.1em 0.35em; border-radius: 4px; }
+.proposal-markdown pre { background: #F4F0E8; padding: 0.9rem 1rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.5; }
+.proposal-markdown pre code { background: none; padding: 0; }
+.proposal-markdown hr { border: 0; border-top: 1px solid #E8E2D8; margin: 1.6rem 0; }
+.proposal-markdown img { max-width: 100%; height: auto; border-radius: 6px; }
+.proposal-markdown table { width: 100%; border-collapse: collapse; font-family: var(--font-sans); font-size: 0.85rem; line-height: 1.45; }
+.proposal-markdown th, .proposal-markdown td { border: 1px solid #E8E2D8; padding: 0.45rem 0.6rem; text-align: left; vertical-align: top; }
+.proposal-markdown th { background: #FAF8F5; font-weight: 600; }

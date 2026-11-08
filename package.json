@@ -1,0 +1,19 @@
+{
+  "name": "quorum-monorepo",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=frontend",
+    "build": "npm run build --workspace=frontend",
+    "build:frontend": "npm run build --workspace=frontend",
+    "test": "npm run test --workspace=frontend",
+    "lint": "oxlint frontend/src",
+    "preview": "npm run preview --workspace=frontend"
+  },
+  "devDependencies": {
+    "oxlint": "^1.81.0"
+  }
+}

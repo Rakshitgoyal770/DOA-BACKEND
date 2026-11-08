@@ -1,0 +1,76 @@
+/* QUORUM — Master Design System Tokens */
+:root {
+  /* Surface & Background Palette (Warm Ivory / Cream / Architectural Stone) */
+  --bg-app: #FAF8F5;
+  --bg-surface: #FFFFFF;
+  --bg-surface-elevated: #FFFDF9;
+  --bg-surface-subtle: #F4F0E8;
+  --bg-surface-muted: #EBE5DA;
+  --bg-surface-inset: #F0ECE3;
+
+  /* Typography & Ink Palette */
+  --text-primary: #181715;
+  --text-secondary: #4A463F;
+  --text-tertiary: #7D776E;
+  --text-disabled: #B5AFA6;
+  --text-inverse: #FAF8F5;
+
+  /* Hairline Borders & Rules */
+  --border-subtle: #E8E2D8;
+  --border-default: #DCD4C5;
+  --border-strong: #BDB3A1;
+  --border-focus: #181715;
+
+  /* Governance Stance Semantics (Calm & Restrained) */
+  --stance-for-text: #1E523A;
+  --stance-for-bg: #E8F5EC;
+  --stance-for-border: #B7DDC4;
+  --stance-for-solid: #23593F;
+
+  --stance-against-text: #8E2F20;
+  --stance-against-bg: #FCEEEA;
+  --stance-against-border: #F2C5BC;
+  --stance-against-solid: #8E2F20;
+
+  --stance-abstain-text: #845210;
+  --stance-abstain-bg: #FEF7EB;
+  --stance-abstain-border: #F7DDB8;
+  --stance-abstain-solid: #8A5917;
+
+  --status-active-text: #143A4D;
+  --status-active-bg: #E8F2F7;
+  --status-active-border: #BCD9E7;
+  --status-active-solid: #1E4D65;
+
+  --status-passed-text: #1E523A;
+  --status-passed-bg: #E8F5EC;
+  --status-passed-border: #B7DDC4;
+
+  --status-closed-text: #5C5852;
+  --status-closed-bg: #F0ECE3;
+  --status-closed-border: #DDD5C7;
+
+  /* Shadows (Subtle, Soft & Architectural) */
+  --shadow-subtle: 0 1px 3px rgba(24, 23, 21, 0.04), 0 1px 2px rgba(24, 23, 21, 0.02);
+  --shadow-card: 0 4px 14px -2px rgba(24, 23, 21, 0.05), 0 2px 4px rgba(24, 23, 21, 0.02);
+  --shadow-elevated: 0 12px 32px -6px rgba(24, 23, 21, 0.08), 0 4px 8px -2px rgba(24, 23, 21, 0.04);
+  --shadow-modal: 0 24px 60px -12px rgba(24, 23, 21, 0.16), 0 6px 16px -2px rgba(24, 23, 21, 0.06);
+
+  /* Font Families */
+  --font-display: 'Instrument Serif', 'Newsreader', Georgia, serif;
+  --font-serif: 'Newsreader', Georgia, serif;
+  --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+
+  /* Radii */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-pill: 9999px;
+
+  /* Transitions */
+  --transition-fast: 150ms cubic-bezier(0.16, 1, 0.3, 1);
+  --transition-normal: 250ms cubic-bezier(0.16, 1, 0.3, 1);
+  --transition-smooth: 400ms cubic-bezier(0.16, 1, 0.3, 1);
+}
