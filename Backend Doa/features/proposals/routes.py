@@ -25,7 +25,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from db.schema import get_connection
-from features.metrics import silence_ratio_pct, winning_share_pct
+from features.metrics import proposal_status, silence_ratio_pct, winning_share_pct
 from features.proposals import service
 
 router = APIRouter(prefix="/proposals", tags=["Proposals"])
@@ -37,7 +37,8 @@ class ProposalSummary(BaseModel):
     id: str
     space_id: str
     title: str
-    state: str | None
+    state: str | None                   # Snapshot's label as of our last sync (can be out of date)
+    status: str                         # upcoming | open | ended_unsettled | closed | unknown, from the dates and the clock
     votes_count: int | None
     forum_posters: int
     silence_ratio_pct: float | None     # forum posters as % of voters
@@ -89,6 +90,7 @@ def _summary_fields(row) -> dict:
         "space_id": row["space_id"],
         "title": row["title"],
         "state": row["state"],
+        "status": proposal_status(row)["status"],
         "votes_count": row["votes_count"],
         "forum_posters": row["forum_posters"],
         "silence_ratio_pct": silence_ratio_pct(row["forum_posters"], row["votes_count"]),

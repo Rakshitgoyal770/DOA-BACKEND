@@ -36,6 +36,7 @@ import textwrap
 
 from db.schema import get_connection
 from features.chat.service import lookups, run_chat
+from features.metrics import proposal_status
 
 if sys.platform == "win32":          # print non-ASCII answers on the Windows console
     try:
@@ -50,14 +51,14 @@ AUTOMATIC_MARK = "   [automatic: the model skipped the search, so we ran it]"
 
 def find_proposals(words: str, limit: int = 10) -> list[dict]:
     """
-    Proposals whose title contains every word, newest first: [{id, title, dao, state}].
+    Proposals whose title contains every word, newest first: [{id, title, dao, state, status}].
 
     Parameters (where they come from):
         words - what you typed after /find.
         limit - how many to show (10).
     """
     terms = [w for w in words.lower().split() if w]
-    sql = ("SELECT p.id, p.title, p.state, s.name AS dao FROM proposals p "
+    sql = ("SELECT p.id, p.title, p.state, p.start_ts, p.end_ts, p.scores_state, s.name AS dao FROM proposals p "
            "LEFT JOIN spaces s ON s.id = p.space_id")
     if terms:
         sql += " WHERE " + " AND ".join("lower(p.title) LIKE ?" for _ in terms)
@@ -67,7 +68,7 @@ def find_proposals(words: str, limit: int = 10) -> list[dict]:
         rows = conn.execute(sql, [f"%{t}%" for t in terms] + [limit]).fetchall()
     finally:
         conn.close()
-    return [dict(r) for r in rows]
+    return [{**dict(r), "status": proposal_status(r)["status"]} for r in rows]
 
 
 def proposal_title(proposal_id: str) -> str | None:
@@ -150,7 +151,7 @@ def main():
             if not found:
                 print("  No proposal title contains those words.")
             for n, p in enumerate(found, 1):
-                print(f"  {n:>2}. [{p['dao']}, {p['state']}] {p['title'][:80]}")
+                print(f"  {n:>2}. [{p['dao']}, {p['status']}] {p['title'][:80]}")
             if found:
                 print("  Type /use <number> to talk about one of them.")
         elif command == "/use":

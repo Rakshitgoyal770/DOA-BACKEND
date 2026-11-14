@@ -59,8 +59,12 @@ SYSTEM_PROMPT = (
     "'scope' field says which proposals a ranking covers, and our data holds only the most "
     "recent proposals of each DAO, so say 'among the proposals in our data' when you rank or "
     "count them. Never add a token name or unit to voting power. A ballot like 'A: 6600000, "
-    "B: 13200000' shows how the voter split their voting power. While a vote is still 'active' "
-    "its top choice is 'leading', never the winner. 'Silence ratio' means forum posters "
+    "B: 13200000' shows how the voter split their voting power. Every proposal has a 'status': "
+    "'open' (voting is open now), 'upcoming', 'ended_unsettled' (voting has ended but the result is "
+    "not final yet) or 'closed' (final). Only a 'closed' proposal has a winner; for any other status "
+    "its top choice is 'leading' (or 'provisional'), never the winner. Call a vote open, live or "
+    "ongoing only when its status is 'open'; for 'ended_unsettled' say voting has ended. "
+    "'Silence ratio' means forum posters "
     "divided by voters. Never count people or posts yourself from the sources (they are only a "
     "few passages): counts come from the DATABASE FACTS, or you say they are not available.\n"
     f"2. You may add general background from your own knowledge (what a DAO, a governance "
@@ -167,8 +171,8 @@ def split_evidence(evidence: list[dict]) -> tuple[list[dict], list[dict]]:
     """
     (passages, fact entries) from the agent's evidence.
 
-    Passages are the chunks of every forum search that found something: de-duplicated, closest
-    first, at most MAX_SOURCES. Two chunks with the same text count as one: a forum thread shared
+    Passages are the chunks of every forum search that found something: de-duplicated, in the
+    order the search ranked them (several searches take turns), at most MAX_SOURCES. Two chunks with the same text count as one: a forum thread shared
     by several proposals is stored once per proposal, and an unscoped search would otherwise fill
     its slots with copies. Of such copies the one from the proposal the search was scoped to is
     kept (its author's vote then refers to the right proposal), else the first found. Fact
@@ -177,19 +181,26 @@ def split_evidence(evidence: list[dict]) -> tuple[list[dict], list[dict]]:
 
     Parameter (where it comes from): the list gather_evidence() returned, via run_chat().
     """
-    chunks, entries = {}, []                       # chunks: (type, text) -> (scoped?, chunk)
+    chunks, entries = {}, []                       # chunks: (type, text) -> (scoped?, best position, chunk)
     for e in evidence:
         found = e["result"].get("chunks") if e["tool"] == "search_forum" and isinstance(e["result"], dict) else None
         if found:
             scope = (e.get("arguments") or {}).get("proposal_id")
-            for c in found:
+            for position, c in enumerate(found):
                 key = (c["metadata"].get("source_type"), c["document"])
                 scoped = bool(scope) and c["metadata"].get("proposal_id") == scope
-                if key not in chunks or (scoped and not chunks[key][0]):
-                    chunks[key] = (scoped, c)
+                if key not in chunks:
+                    chunks[key] = (scoped, position, c)
+                else:
+                    was_scoped, best, kept = chunks[key]
+                    chunks[key] = (scoped or was_scoped, min(best, position), c if scoped and not was_scoped else kept)
         else:
             entries.append(e)
-    return sorted((c for _, c in chunks.values()), key=lambda c: c["distance"])[:MAX_SOURCES], entries
+    # Order: each search's own ranking is kept (retrieval.py merged meaning and keywords into it),
+    # and several searches take turns: every search's best passage, then every second-best, ...
+    # so a "for and against" question keeps passages of both searches. Ties: closer in meaning first.
+    ordered = sorted(chunks.values(), key=lambda item: (item[1], item[2]["distance"]))
+    return [c for _, _, c in ordered][:MAX_SOURCES], entries
 
 
 def format_facts(entries: list[dict]) -> str:

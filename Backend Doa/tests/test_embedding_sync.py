@@ -60,8 +60,11 @@ def test_first_sync_embeds_everything(small_db, collection):
 
     assert result["embed"] == 3                         # 1 proposal chunk + 2 non-empty posts
     assert collection.count() == 3
-    assert sorted(model.encoded) == sorted(["First paragraph.\n\nSecond paragraph.",
-                                            "I support this.", "I am against it."])
+    # what is embedded is a context line + the chunk; what is stored is the plain chunk
+    assert sorted(model.encoded) == sorted(['Text of the proposal "Proposal P1":\nFirst paragraph.\n\nSecond paragraph.',
+                                            'Forum post by alice on the proposal "Proposal P1":\nI support this.',
+                                            'Forum post by bob on the proposal "Proposal P1":\nI am against it.'])
+    assert stored(collection, post_doc(10))[0] == "I support this."
 
 
 def test_second_sync_does_no_work(small_db, collection):
@@ -77,7 +80,7 @@ def test_only_changed_text_is_re_embedded(small_db, collection):
     model = FakeModel()
     result = sync_index(small_db, collection=collection, model=model)
 
-    assert model.encoded == ["Edited: I now support it."]
+    assert model.encoded == ['Forum post by bob on the proposal "Proposal P1":\nEdited: I now support it.']
     assert result["embed"] == 1
     assert stored(collection, post_doc(11))[0] == "Edited: I now support it."
 

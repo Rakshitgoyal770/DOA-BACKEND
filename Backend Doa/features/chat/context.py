@@ -26,13 +26,19 @@ INPUTS
              "distance" and "metadata" (source_type, proposal_id, author, ...).
 """
 
+import datetime
 import json
 
 from features.identity.common import verified_ens_name
-from features.metrics import (choice_text, count_forum_posters, decode_choice,
-                              silence_ratio_pct, top_voter_share)
+from features.metrics import (STATUS_MEANS, choice_text, count_forum_posters, decode_choice,
+                              proposal_status, silence_ratio_pct, top_voter_share)
 
 TOP_N_WHALES = 4           # the "top-N wallets" share reported in the facts
+
+
+def _day(ts: int | None) -> str | None:
+    """A UTC epoch time as 'YYYY-MM-DD', or None."""
+    return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).strftime("%Y-%m-%d") if ts else None
 
 
 def _fmt_vp(vp: float | None) -> str | None:
@@ -54,14 +60,16 @@ def proposal_facts(conn, proposal_id: str) -> dict | None:
         proposal_id - chosen by the agent (tools.proposal_details), usually taken from
                       tools.find_proposals; or a test.
 
-    Returns: dao, title, state, results (choice / score / share %), winning_choice,
-    total_voters, forum_posters, silence_ratio_pct, top_4_voters_share_pct,
-    votes_loaded, votes_partial.
+    Returns: dao, title, status (+ status_means, voting_ends, data_as_of), results (choice / score /
+    share %), winning_choice (only once the result is final) or leading_choice (while it is not),
+    total_voters, forum_posters, silence_ratio_pct, top_4_voters_share_pct, votes_loaded, votes_partial.
+    The status comes from metrics.proposal_status: it uses the voting dates and the clock, so a vote
+    stored as 'active' whose time is over is reported as ended, not as open.
     """
     p = conn.execute(
         """
         SELECT p.id, p.title, p.state, p.choices_json, p.scores_json, p.scores_total,
-               p.votes_count, s.name AS dao
+               p.votes_count, p.start_ts, p.end_ts, p.scores_state, p.fetched_at, s.name AS dao
         FROM proposals p LEFT JOIN spaces s ON s.id = p.space_id WHERE p.id = ?
         """,
         (proposal_id,),
@@ -79,12 +87,20 @@ def proposal_facts(conn, proposal_id: str) -> dict | None:
     posters = count_forum_posters(conn, proposal_id)
     whales = top_voter_share(conn, proposal_id, TOP_N_WHALES)
 
+    status = proposal_status(p)["status"]
+    top_choice = max(results, key=lambda r: r["score"])["choice"] if results else None
+
     return {
         "proposal_id": p["id"],
         "dao": p["dao"],
         "title": p["title"],
-        "state": p["state"],
-        "winning_choice": max(results, key=lambda r: r["score"])["choice"] if results else None,
+        "status": status,
+        "status_means": STATUS_MEANS[status],
+        "voting_ends": _day(p["end_ts"]),
+        "data_as_of": (p["fetched_at"] or "")[:10] or None,
+        # a winner exists only when the result is final; before that the top choice is only leading
+        "winning_choice": top_choice if status == "closed" else None,
+        "leading_choice": top_choice if status != "closed" else None,
         "results": results,
         "total_voters": p["votes_count"],
         "forum_posters": posters,

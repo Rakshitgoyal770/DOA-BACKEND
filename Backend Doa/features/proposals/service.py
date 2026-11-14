@@ -48,7 +48,7 @@ def list_proposals(conn, space_id: str | None, state: str | None, limit: int, sk
     return conn.execute(f"""
         SELECT p.id, p.space_id, p.title, p.state, p.votes_count,
                p.scores_json, p.scores_total, p.link, p.discussion_url,
-               p.author, p.start_ts, p.end_ts,
+               p.author, p.start_ts, p.end_ts, p.scores_state, p.fetched_at,
                {FORUM_POSTERS_SQL} AS forum_posters
         FROM proposals p
         LEFT JOIN forum_posts fp ON fp.proposal_id = p.id

@@ -13,6 +13,7 @@ import json
 import pytest
 
 import features.chat.tools as tools
+import features.metrics as metrics
 from tests.helpers import add_identity, add_post, add_proposal
 
 ARB = "arbitrumfoundation.eth"
@@ -84,7 +85,8 @@ def test_ranking_can_be_limited_to_one_dao(db):
     assert "Arbitrum DAO" in out["scope"]
 
 
-def test_an_open_vote_is_leading_never_the_winner(db):
+def test_an_open_vote_is_leading_never_the_winner(db, monkeypatch):
+    monkeypatch.setattr(metrics, "utc_now", lambda: 1_700_050_000)      # inside the test proposals' voting window
     add_proposal(db, "A", space_id=ARB, title="Open", votes_count=50, state="active", scores=[80, 20])
     add_proposal(db, "B", space_id=ARB, title="Done", votes_count=900, scores=[60, 40])
     results = {p["title"]: p["result"] for p in tools.list_proposals(db, "voters", dao="arbitrum")["proposals"]}
@@ -211,7 +213,7 @@ def test_search_attaches_each_authors_wallet_and_vote(db, monkeypatch):
 
 def test_search_filters_by_proposal_and_author(db, monkeypatch):
     add_proposal(db, "P")
-    add_post(db, 1, "P", "Griff", "hello")                    # the index keeps the original spelling
+    add_post(db, 1, "P", "Griff", "hello")                    # the filter is on the lower-case name
     calls = []
     monkeypatch.setattr(tools, "retrieve", fake_retrieve(calls, []))
 
@@ -220,24 +222,23 @@ def test_search_filters_by_proposal_and_author(db, monkeypatch):
     tools.search_forum(db, "anything", proposal_id="P", author="griff", n=99)
 
     assert calls[0] == {"n": 5, "where": {"proposal_id": "P"}, "max_distance": tools.MAX_DISTANCE_ONE_PROPOSAL}
-    assert calls[1] == {"n": 5, "where": {"author": "Griff"}, "max_distance": tools.MAX_DISTANCE_ONE_AUTHOR}
-    assert calls[2]["where"] == {"$and": [{"proposal_id": "P"}, {"author": "Griff"}]}
+    assert calls[1] == {"n": 5, "where": {"author_lower": "griff"}, "max_distance": tools.MAX_DISTANCE_ONE_AUTHOR}
+    assert calls[2]["where"] == {"$and": [{"proposal_id": "P"}, {"author_lower": "griff"}]}
     assert calls[2]["n"] == 8                                                          # bounded
 
 
-def test_search_can_be_limited_to_one_dao_through_its_proposal_ids(db, monkeypatch):
-    """Forum chunks carry no DAO field, so 'Arbitrum only' is a filter on that DAO's proposal ids."""
+def test_search_can_be_limited_to_one_dao(db, monkeypatch):
+    """Every chunk carries its DAO (space_id), so 'Arbitrum only' is one filter, not a list of proposal ids."""
     add_proposal(db, "A1", space_id=ARB)
     add_proposal(db, "A2", space_id=ARB)
     add_proposal(db, "O1", space_id=OPT)
     calls = []
     monkeypatch.setattr(tools, "retrieve", fake_retrieve(calls, []))
     tools.search_forum(db, "treasury risks", dao="Arbitrum DAO")
-    where = calls[0]["where"]["proposal_id"]
-    assert sorted(where["$in"]) == ["A1", "A2"]                          # nothing of Optimism
+    assert calls[0]["where"] == {"space_id": ARB}                        # nothing of Optimism
     assert calls[0]["max_distance"] == tools.MAX_DISTANCE_ANYWHERE
     tools.search_forum(db, "treasury risks", dao="arbitrum", source_type="forum_post")
-    assert calls[1]["where"]["$and"][1] == {"source_type": "forum_post"}
+    assert calls[1]["where"] == {"$and": [{"space_id": ARB}, {"source_type": "forum_post"}]}
 
 
 def test_a_selected_proposal_wins_over_a_dao(db, monkeypatch):

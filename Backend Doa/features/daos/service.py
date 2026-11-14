@@ -22,7 +22,7 @@ INPUTS
                config/curated_daos.py, GET /daos/{space_id} takes it from the URL.
 """
 
-from features.metrics import FORUM_POSTERS_SQL, silence_ratio_pct, winning_share_pct
+from features.metrics import FORUM_POSTERS_SQL, proposal_status, silence_ratio_pct, winning_share_pct
 
 
 def get_space(conn, space_id: str):
@@ -92,6 +92,7 @@ def top_proposals(conn, space_id: str, limit: int = 5) -> list[dict]:
     """
     rows = conn.execute(f"""
         SELECT p.id, p.title, p.state, p.votes_count, p.scores_json, p.scores_total, p.link,
+               p.start_ts, p.end_ts, p.scores_state, p.fetched_at,
                {FORUM_POSTERS_SQL} AS forum_posters
         FROM proposals p
         LEFT JOIN forum_posts fp ON fp.proposal_id = p.id
@@ -106,6 +107,7 @@ def top_proposals(conn, space_id: str, limit: int = 5) -> list[dict]:
             "id": p["id"],
             "title": p["title"],
             "state": p["state"],
+            "status": proposal_status(p)["status"],
             "votes_count": p["votes_count"] or 0,
             "forum_posters": p["forum_posters"] or 0,
             "silence_ratio_pct": silence_ratio_pct(p["forum_posters"], p["votes_count"]),

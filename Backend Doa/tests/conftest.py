@@ -17,3 +17,10 @@ def db(tmp_path, monkeypatch):
     conn = schema.get_connection()
     yield conn
     conn.close()
+
+
+@pytest.fixture(autouse=True)
+def agent_pipeline_unless_a_test_asks(monkeypatch):
+    """Existing chat tests script the agent; a test of the planned pipeline sets CHAT_PIPELINE itself.
+    Without this default a test could reach a real model provider through the planner."""
+    monkeypatch.setenv("CHAT_PIPELINE", "agent")

@@ -72,8 +72,11 @@ def test_short_posts_keep_their_id_and_long_posts_get_chunk_suffixes(db):
     long_ids = [i for i in docs if i.startswith("forum_post_P_2")]
     assert len(long_ids) > 1 and long_ids == [f"forum_post_P_2_c{n}" for n in range(len(long_ids))]
     assert all(len(docs[i][0]) <= FORUM_MAX_CHARS for i in long_ids)
-    assert len({tuple(sorted(docs[i][1].items())) for i in long_ids}) == 1       # every chunk has the author's metadata
+    per_chunk = {"chunk_index", "content_hash", "embedded_hash"}                                  # these differ chunk by chunk, on purpose
+    shared = {tuple(sorted((k, v) for k, v in docs[i][1].items() if k not in per_chunk)) for i in long_ids}
+    assert len(shared) == 1                                                      # every chunk has the author's metadata
     assert docs[long_ids[0]][1]["author"] == "long"
+    assert [docs[i][1]["chunk_index"] for i in long_ids] == list(range(len(long_ids)))
 
 
 def test_long_proposal_bodies_are_chunked_with_the_proposal_limit(db):

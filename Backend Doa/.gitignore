@@ -41,3 +41,7 @@ htmlcov/
 
 # Saved evaluation runs (generated output)
 eval/results/
+
+# Database backups and logs written by features/sync/refresh.py
+backups/
+logs/

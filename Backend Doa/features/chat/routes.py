@@ -64,7 +64,9 @@ class ChatResponse(BaseModel):
     provider: str
     chunks_found: int
     sources: list[SourceChunk]
-    lookups: list[dict] = []            # [{"tool", "arguments", "result"}]: what the agent looked up
+    lookups: list[dict] = []            # [{"tool", "arguments", "result"}]: what was looked up
+    plan: dict = {}                     # how the question was understood: {"mode": "planned", "kind": ...} or {"mode": "agent"}
+    citations: dict = {}                # the citation check: ok, invalid_sources, unsupported_numbers, repaired
 
 
 def _source(c: dict) -> SourceChunk:
@@ -112,6 +114,8 @@ def chat(req: ChatRequest):
         chunks_found=len(result["chunks"]),
         sources=[_source(c) for c in result["chunks"]],
         lookups=lookups(result["evidence"]),
+        plan=result["plan"],
+        citations=result["citations"],
     )
 
 

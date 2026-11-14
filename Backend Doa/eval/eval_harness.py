@@ -161,7 +161,12 @@ def run_case(case: dict, judge: bool) -> dict:
 
     retrieved = [c["id"] for c in out["chunks"]]
     result = {"id": case["id"], "question": case["question"], **grade(case, out["answer"], retrieved),
-              "answer": out["answer"], "provider": out["provider"], "retrieved": retrieved}
+              "answer": out["answer"], "provider": out["provider"], "retrieved": retrieved,
+              # how the evidence was gathered (CHAT_PIPELINE=planned|agent) and what the citation check found,
+              # so a planned run and an agent run of the same cases can be compared
+              "pipeline": (out.get("plan") or {}).get("mode"), "plan_kind": (out.get("plan") or {}).get("kind"),
+              "citations": {k: v for k, v in (out.get("citations") or {}).items()
+                            if k in ("ok", "invalid_sources", "repaired", "unsupported_numbers")}}
     if judge and out["answer"]:
         result["faithfulness"], _ = score_faithfulness(out["answer"], [c["document"] for c in out["chunks"]],
                                                     out["evidence"])

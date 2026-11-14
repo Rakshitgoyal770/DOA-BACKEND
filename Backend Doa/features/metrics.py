@@ -9,6 +9,8 @@ WHAT THIS FILE DOES
       * winning share      the winning choice's % of all voting power
       * top-voter share    how much voting power the largest N wallets hold
       * choice names       turning Snapshot's choice numbers ([1, 4]) into names
+      * proposal status    whether voting is open RIGHT NOW (upcoming / open / ended_unsettled /
+                           closed), from the voting dates and the clock, not the stored label alone
 
     Before this file existed the same formulas were written 2-4 times in
     different modules, and two copies disagreed (one counted "Alice" and
@@ -29,6 +31,8 @@ INPUTS
 """
 
 import json
+import time
+from datetime import datetime, timezone
 
 from features.votes.completeness import PARTIAL, vote_status
 
@@ -37,6 +41,99 @@ from features.votes.completeness import PARTIAL, vote_status
 # (they join forum_posts as `fp`). Usernames are compared lower-case, so
 # "Alice" and "alice" are one person.
 FORUM_POSTERS_SQL = "COUNT(DISTINCT lower(fp.username))"
+
+
+# ── Is a proposal open for voting? ────────────────────────────────────────────
+
+# What each status means, in the words the chat may repeat. Returned by the chat lookups
+# next to every status so the writer never has to guess what a label means.
+STATUS_MEANS = {
+    "upcoming": "voting has not opened yet",
+    "open": "voting is open now",
+    "ended_unsettled": "voting has ended, but the final result is not confirmed in our data yet",
+    "closed": "voting has ended and the result is final",
+    "unknown": "we have no dates or state for this proposal",
+}
+
+# Where a proposal is in its life: 0 = before voting, 1 = voting open, 2 = voting over.
+_STAGE_OF_STATE = {"pending": 0, "active": 1, "closed": 2}
+_STATUS_OF_STAGE = {0: "upcoming", 1: "open"}
+
+
+def utc_now() -> int:
+    """Now, as UTC epoch seconds. A function (not time.time() inline) so tests can freeze the clock."""
+    return int(time.time())
+
+
+def _field(row, key):
+    """row[key] for a sqlite3.Row or a dict; None when the column is not there."""
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
+
+
+def _epoch(iso: str | None) -> int | None:
+    """'2026-10-22T09:36:29.455707+00:00' -> UTC epoch seconds, or None if missing or unreadable."""
+    if not iso:
+        return None
+    try:
+        moment = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return int((moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)).timestamp())
+
+
+def proposal_status(row, now: int | None = None) -> dict:
+    """
+    Whether a proposal is open for voting RIGHT NOW. Returns:
+        status          upcoming | open | ended_unsettled | closed | unknown  (see STATUS_MEANS)
+        stored_state    the label Snapshot gave it at our last sync (pending | active | closed)
+        stale_label     True when the label is behind the clock, e.g. stored 'active' but the voting
+                        window is over (our data is older than the vote)
+        voting_ends     end time, UTC epoch seconds (None if unknown)
+        seconds_left    while open: seconds until voting ends, else None
+        data_age_seconds  how old our copy of the proposal is (None if fetched_at is missing)
+
+    THE RULE
+      The stored label only changes when we sync, so it can fall BEHIND reality but never ahead of
+      it. The voting window (start_ts, end_ts) is checked against the clock, so it is always current.
+      The proposal is in whichever stage is FURTHER ALONG: a label of 'active' cannot keep a
+      proposal open after end_ts, and a label of 'closed' is believed even if the clock disagrees.
+      Once voting is over it is 'closed' only if Snapshot's scores are final (scores_state 'final';
+      an older row with no scores_state and the label 'closed' also counts), else 'ended_unsettled'.
+
+    Parameters (where they come from):
+        row - a proposals row (sqlite3.Row or dict) with state, start_ts, end_ts and, when known,
+              scores_state and fetched_at. Missing columns count as unknown.
+        now - UTC epoch seconds; None = the current time. Tests pass a fixed value.
+    """
+    now = utc_now() if now is None else int(now)
+    start, end = _field(row, "start_ts"), _field(row, "end_ts")
+    label, scores_state = _field(row, "state"), _field(row, "scores_state")
+
+    by_clock = None if start is None or end is None else (0 if now < start else 1 if now < end else 2)
+    by_label = _STAGE_OF_STATE.get(label)
+    stages = [s for s in (by_clock, by_label) if s is not None]
+
+    if not stages:
+        status = "unknown"
+    elif max(stages) < 2:
+        status = _STATUS_OF_STAGE[max(stages)]
+    elif scores_state == "final" or (scores_state is None and label == "closed"):
+        status = "closed"
+    else:
+        status = "ended_unsettled"
+
+    fetched = _epoch(_field(row, "fetched_at"))
+    return {
+        "status": status,
+        "stored_state": label,
+        "stale_label": by_clock is not None and by_label is not None and by_clock > by_label,
+        "voting_ends": end,
+        "seconds_left": (end - now) if status == "open" and end is not None else None,
+        "data_age_seconds": max(0, now - fetched) if fetched is not None else None,
+    }
 
 
 def count_forum_posters(conn, proposal_id: str) -> int:

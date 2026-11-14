@@ -45,14 +45,20 @@ from features.chat.context import enrich_chunks, proposal_facts
 from features.chat.retrieval import retrieve
 from features.daos.service import compute_dao_stats
 from features.identity.common import verified_ens_name
-from features.metrics import choice_text, decode_choice, winning_choice, winning_share_pct
+from features import metrics
+from features.metrics import (STATUS_MEANS, choice_text, decode_choice, proposal_status,
+                              winning_choice, winning_share_pct)
 
-# How far (cosine distance, lower = closer in meaning) a passage may be from the query. Measured on
-# real data: a descriptive sentence lands at 0.44-0.58, one keyword at 0.72-0.95. Inside one proposal
-# or one author's posts the nearest passages are meaningful even when not very close; across all
-# proposals a weak match is only noise.
-MAX_DISTANCE_ANYWHERE = 0.7
-MAX_DISTANCE_ONE_PROPOSAL = 0.85
+# How far a passage may be from the query (squared L2 distance between unit vectors, which is
+# 2 - 2 x cosine similarity; lower = closer in meaning). The ranking is done by the keyword merge and
+# the reranker (features/chat/retrieval.py); this cutoff only keeps out passages that have nothing to
+# do with the question. Measured on 13 Nov 2026 with the current embeddings (context line + query
+# instruction): the correct passages of eval/retrieval_set.json lie at 0.20-0.83, and for questions
+# that are not about governance at all ("What is the capital of France?") the nearest passage is at
+# 0.99 or more. Inside one proposal or one author's posts the search is already narrow, so the
+# cutoff is looser there. Re-measure after changing the embedding model: python -m eval.retrieval_eval.
+MAX_DISTANCE_ANYWHERE = 0.9
+MAX_DISTANCE_ONE_PROPOSAL = 0.95
 MAX_DISTANCE_ONE_AUTHOR = 1.0
 MAX_RESULT_CHARS = 3500   # one result is cut to this (free LLM tiers limit tokens per minute)
 POST_CHARS = 700          # forum text per post inside person()
@@ -91,13 +97,21 @@ def _date(ts: int | None) -> str | None:
     return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).strftime("%Y-%m-%d") if ts else None
 
 
-def _result(r) -> str | None:
-    """'winner: For 91.7%' for a closed vote, 'leading: For 93.8%' for an open one."""
+def _result(r, now: int | None = None) -> str | None:
+    """
+    'winner: For 91.7%' once the result is final, 'provisional: For 93.8%' when voting has ended but
+    the result is not final yet, 'leading: For 93.8%' while voting is open (or has not opened).
+    The word depends on proposal_status (the clock and the stored state), not on the stored state alone.
+
+    Parameters (where they come from): a proposals row with state, start_ts, end_ts and scores_state,
+    from list_proposals; now = the clock reading it shares with the other rows (None = current time).
+    """
     choice = winning_choice(r["choices_json"], r["scores_json"])
     share = winning_share_pct(r["scores_json"], r["scores_total"])
     if choice is None or share is None:
         return None
-    return f"{'winner' if r['state'] == 'closed' else 'leading'}: {choice} {share}%"
+    word = {"closed": "winner", "ended_unsettled": "provisional"}.get(proposal_status(r, now)["status"], "leading")
+    return f"{word}: {choice} {share}%"
 
 
 def _clip(text: str | None, limit: int) -> str:
@@ -117,14 +131,16 @@ def find_proposals(conn, words: str, dao: str | None = None) -> list | dict:
     if dao and not space:
         return _unknown_dao(dao)
     terms = [w for w in words.lower().replace('"', " ").split() if len(w) > 1]
-    rows = conn.execute("SELECT id, space_id, title, state, votes_count FROM proposals").fetchall()
+    rows = conn.execute("SELECT id, space_id, title, state, votes_count, start_ts, end_ts, scores_state, fetched_at "
+                        "FROM proposals").fetchall()
     scored = [(sum(t in (r["title"] or "").lower() for t in terms), r)
               for r in rows if not space or r["space_id"] == space]
     scored = sorted((s for s in scored if s[0]), key=lambda s: -s[0])[:5]
     if not scored:
         return {"error": "No proposal title contains those words."}
+    now = metrics.utc_now()                           # read through the module, so tests can freeze the clock
     return [{"proposal_id": r["id"], "title": r["title"], "dao": DAO_NAMES.get(r["space_id"]),
-             "state": r["state"], "voters": r["votes_count"],
+             "status": proposal_status(r, now)["status"], "voters": r["votes_count"],
              "title_words_matched": f"{score} of {len(terms)}"} for score, r in scored]
 
 
@@ -134,16 +150,18 @@ def list_proposals(conn, order_by: str = "voters", dao: str | None = None, limit
     if dao and not space:
         return _unknown_dao(dao)
     rows = conn.execute(
-        "SELECT id, space_id, title, state, votes_count, created_ts, end_ts, choices_json, "
-        "scores_json, scores_total FROM proposals" + (" WHERE space_id = ?" if space else ""),
+        "SELECT id, space_id, title, state, votes_count, created_ts, start_ts, end_ts, choices_json, "
+        "scores_json, scores_total, scores_state, fetched_at FROM proposals"
+        + (" WHERE space_id = ?" if space else ""),
         (space,) if space else ()).fetchall()
     held = len(rows)
+    now = metrics.utc_now()                           # one clock reading, so every row is judged at the same moment
     if order_by == "newest":
         rows.sort(key=lambda r: r["created_ts"] or 0, reverse=True)
         order = "newest first"
     elif order_by == "closest":
         # in a nine-candidate election an 18% winner is normal, so only 2-3 option votes count
-        rows = [r for r in rows if r["state"] == "closed" and r["choices_json"]
+        rows = [r for r in rows if proposal_status(r, now)["status"] == "closed" and r["choices_json"]
                 and len(json.loads(r["choices_json"])) <= 3
                 and winning_share_pct(r["scores_json"], r["scores_total"]) is not None]
         rows.sort(key=lambda r: winning_share_pct(r["scores_json"], r["scores_total"]))
@@ -155,9 +173,11 @@ def list_proposals(conn, order_by: str = "voters", dao: str | None = None, limit
         "scope": f"all {held} proposals we hold for {DAO_NAMES[space] if space else 'all 5 DAOs'} "
                  "(the most recent ones of each DAO, not their full history)",
         "order": order,
+        "status_means": {k: v for k, v in STATUS_MEANS.items() if k != "unknown"},
+        "data_as_of": max((r["fetched_at"] or "" for r in rows), default="")[:10] or None,
         "proposals": [{"proposal_id": r["id"], "dao": DAO_NAMES.get(r["space_id"]), "title": r["title"],
-                       "state": r["state"], "voters": r["votes_count"], "voting_ends": _date(r["end_ts"]),
-                       "result": _result(r)}
+                       "status": proposal_status(r, now)["status"], "voters": r["votes_count"],
+                       "voting_ends": _date(r["end_ts"]), "result": _result(r, now)}
                       for r in rows[:_bounded(limit, 1, 10)]],
     }
 
@@ -251,11 +271,12 @@ def person(conn, name: str, proposal_id: str | None = None) -> dict:
 def search_forum(conn, query: str, proposal_id: str | None = None, author: str | None = None, n: int = 5,
                  source_type: str | None = None, dao: str | None = None) -> dict:
     """
-    Passages (forum posts and proposal text) closest in meaning to the query, optionally
-    limited to one proposal, one DAO, one author and/or one kind of text ("proposal_body" = the
-    proposal's own text, "forum_post"). A DAO limits the search to the passages of that DAO's
-    proposals (the index has no DAO field on forum chunks, so we filter on the DAO's proposal ids);
-    it is ignored when a proposal is given, since the proposal is narrower. Returns {"chunks": [...]}: the chunks of
+    Passages (forum posts and proposal text) that best match the query by meaning and by
+    keywords (features/chat/retrieval.py), optionally limited to one proposal, one DAO, one
+    author and/or one kind of text ("proposal_body" = the proposal's own text, "forum_post").
+    The limits are filters on the chunk metadata (vector/chunk_metadata.py): proposal_id,
+    space_id (the DAO), author_lower, source_type. A DAO is ignored when a proposal is given,
+    since the proposal is narrower. Returns {"chunks": [...]}: the chunks of
     features/chat/retrieval.py, each with "sql" (the author's wallet, link confidence, vote
     and voting power on that proposal) and "proposal_title".
     """
@@ -264,18 +285,16 @@ def search_forum(conn, query: str, proposal_id: str | None = None, author: str |
         space = resolve_dao(dao)
         if not space:
             return {"error": f"'{dao}' is not one of our DAOs ({', '.join(d['name'] for d in CURATED_DAOS)})."}
-        ids = [r[0] for r in conn.execute("SELECT id FROM proposals WHERE space_id = ?", (space,))]
-        if not ids:
+        if not conn.execute("SELECT 1 FROM proposals WHERE space_id = ? LIMIT 1", (space,)).fetchone():
             return {"chunks": [], "note": f"we hold no proposals of {DAO_NAMES[space]}"}
-        filters.append({"proposal_id": {"$in": ids}})
+        filters.append({"space_id": space})
     if source_type:
         filters.append({"source_type": source_type})
     if author:
-        row = conn.execute("SELECT username FROM forum_posts WHERE lower(username) = ? LIMIT 1",
-                           (author.strip().lstrip("@").lower(),)).fetchone()
-        if not row:
+        name = author.strip().lstrip("@").lower()
+        if not conn.execute("SELECT 1 FROM forum_posts WHERE lower(username) = ? LIMIT 1", (name,)).fetchone():
             return {"error": f"No forum posts by '{author}' in our data."}
-        filters.append({"author": row[0]})       # the index stores the username's original spelling
+        filters.append({"author_lower": name})   # however the question or the forum spelled the name
     where = filters[0] if len(filters) == 1 else ({"$and": filters} if filters else None)
     max_distance = (MAX_DISTANCE_ONE_AUTHOR if author else
                     MAX_DISTANCE_ONE_PROPOSAL if proposal_id else MAX_DISTANCE_ANYWHERE)

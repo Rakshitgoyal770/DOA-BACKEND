@@ -233,8 +233,21 @@ flowchart LR
   forum posts: split by sentence to 1,200 characters when they do not fit; both
   also capped at 500 tokens). A post that fits keeps its single document; a
   longer one becomes several (`_c0`, `_c1`, ...). See the header of that file for the reasoning.
-- Forum metadata can include `resolved_wallet`, `confidence_level`, and
-  proposal-specific `voting_power`.
+- Every chunk's metadata is built and validated by
+  [`vector/chunk_metadata.py`](./vector/chunk_metadata.py) (schema version 2):
+  - **all chunks:** `schema_version`, `managed_by`, `source_type`, `proposal_id`, `space_id`
+    (the DAO), `title`, `chunk_index`, `chunk_count`, `content_hash`, `created_at` (UTC epoch seconds);
+  - **forum posts:** `author` (as written), `author_lower`, `post_id`, `post_number`, `topic_id`,
+    `thread_key` (`<forum host>:<topic id>`);
+  - **proposal text:** `proposal_author` (the proposer's wallet, lower case);
+  - **transitional, dynamic:** `resolved_wallet`, `confidence_level`, `voting_power` (forum posts whose
+    author is linked). These change when links or votes change, so new code should read such facts
+    from SQLite at question time.
+  A field with no value is left out (Chroma rejects null). Chroma filters use these keys, for example
+  `{"space_id": "ens.eth"}`, `{"author_lower": "griff"}` or `{"created_at": {"$gte": 1761000000}}`.
+- `python -m vector.embedding --check` validates every stored chunk against that schema (no model,
+  no writes). A document in Chroma that this pipeline did not create is reported as `foreign` and
+  left alone; `--remove-foreign` deletes it.
 
 ## 5. `POST /chat` query flow
 
@@ -276,17 +289,31 @@ sequenceDiagram
 
 Important behavior:
 
+0. Stage 1 has two ways to gather the evidence (`CHAT_PIPELINE`, default `planned`).
+   **Planned** ([`features/chat/planner.py`](./features/chat/planner.py)): one understanding step (rules for a greeting or a
+   plain ranking, otherwise one model call returning a JSON plan: kind, DAO, proposal title words, person, search sentence),
+   then a fixed table of lookups per kind; passages are searched on every question about a proposal's content, arguments,
+   advice or a person, and never next to a pure count or ranking. **Agent** ([`features/chat/agent.py`](./features/chat/agent.py)):
+   the model picks lookups in a loop; it also takes over when the planner cannot place a question. After the writer answers,
+   [`features/chat/citations.py`](./features/chat/citations.py) checks the citations: an answer citing a source that was never
+   given is rewritten once, then stripped of the bad markers. `POST /chat` returns `plan` and `citations`.
 1. The seven lookups ([`features/chat/tools.py`](./features/chat/tools.py)): `find_proposals`,
    `list_proposals`, `dao_stats`, `proposal_details`, `top_voters`, `person`, `search_forum`.
    Numbers come from the same code as the API endpoints ([`features/metrics.py`](./features/metrics.py)).
 2. If the user selected a proposal (`proposal_id`), lookups that take one use it whenever the model
    leaves it out.
-3. `search_forum` embeds the query and asks ChromaDB for the nearest chunks. A passage is dropped when
-   its distance exceeds 0.7 (searching everywhere), 0.85 (inside one proposal) or 1.0 (one author's
-   posts). Every forum passage comes with its author's wallet and how that wallet voted.
-   Every chunk carries its `proposal_id`, so a search can be limited to one proposal (`where proposal_id`,
-   no leaks: tested on all 118) or to one DAO (`proposal_id $in` that DAO's ids: forum chunks have no DAO
-   field). Searches over everything mix proposals, so each passage header shown to the writer names its
+3. `search_forum` searches the chunks twice and merges the results
+   ([`features/chat/retrieval.py`](./features/chat/retrieval.py)): a vector search (the question is
+   embedded with the model's query instruction; each chunk was embedded with a context line naming its
+   author and proposal) and a BM25 keyword search ([`vector/keyword_index.py`](./vector/keyword_index.py)).
+   The two rankings are merged by rank, a passage is dropped when its distance exceeds 0.9 (searching
+   everywhere), 0.95 (inside one proposal) or 1.0 (one author's posts), and a reranker
+   ([`vector/reranker.py`](./vector/reranker.py)) orders what is left. On `eval/retrieval_set.json`
+   (43 questions, `python -m eval.retrieval_eval`) the right passage is in the top 5 for 93% of the
+   questions; the vector search alone found 63%.
+   Every forum passage comes with its author's wallet and how that wallet voted.
+   Every chunk carries its `proposal_id`, `space_id` (the DAO) and `author_lower`, so a search can be
+   limited to one proposal, one DAO or one author with a metadata filter. Searches over everything mix proposals, so each passage header shown to the writer names its
    proposal, and identical texts stored under several proposals (shared forum threads) count as one passage.
 4. The agent may run at most 6 rounds and 2 forum searches, and a repeated lookup is skipped.
    **Safety net:** if the question asks for reasons or opinions (why, argued, concerns, said, feel, what

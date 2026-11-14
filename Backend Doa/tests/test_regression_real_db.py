@@ -129,7 +129,8 @@ def test_most_voters_across_all_daos_is_found(conn):
     """The old pipeline said 1,019 (it only saw the 3 proposals search returned)."""
     top = tools.list_proposals(conn, "voters", limit=1)
     assert top["proposals"][0]["voters"] == 63845 and top["proposals"][0]["dao"] == "Optimism Collective"
-    assert top["scope"].startswith("all 118 proposals we hold for all 5 DAOs")
+    held = conn.execute("SELECT COUNT(*) FROM proposals").fetchone()[0]          # grows with every data refresh
+    assert top["scope"].startswith(f"all {held} proposals we hold for all 5 DAOs")
 
 
 def test_the_largest_voter_on_oat_elections_and_their_ballot(conn):
@@ -148,4 +149,5 @@ def test_griffs_vote_is_found_by_name(conn):
 
 def test_ens_has_the_highest_average_silence_ratio(conn):
     ratios = {d["dao"]: d["avg_silence_ratio_pct"] for d in tools.dao_stats(conn)["daos"]}
-    assert max(ratios, key=ratios.get) == "ENS" and ratios["ENS"] == 11.549
+    # The exact value moves with every data refresh (11.549 on 22 Oct 2026, 11.198 on 13 Nov 2026).
+    assert max(ratios, key=ratios.get) == "ENS" and 5 < ratios["ENS"] < 25

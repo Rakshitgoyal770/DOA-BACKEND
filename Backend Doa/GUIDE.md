@@ -47,10 +47,11 @@ Example: `POST /chat {"query": "Why did people support it?", "proposal_id": "0xe
 | 1 | [main.py](main.py) | — | The request matches the `/chat` router | → routes |
 | 2 | [features/chat/routes.py](features/chat/routes.py) | `chat` | Validates the body (`query` 3–2000 chars, `n_results` 1–20) | → `run_chat` |
 | 3 | [features/chat/service.py](features/chat/service.py) | `run_chat` | Two stages: gather the evidence, then write the answer. **Same function the terminal chat and the evaluation use.** | one answer + sources + lookups |
-| 4 | [features/chat/agent.py](features/chat/agent.py) | `gather_evidence` | **Stage 1.** Sends the question and the lookup descriptions to the LLM. The LLM replies "run `search_forum(...)`" (a request, not an answer); we run it and send the result back; repeat until it says `DONE` (max 6 rounds, max 2 forum searches). It never writes the answer. If the question asks for reasons or opinions and the model skipped the forum search, we run it ourselves (`automatic`). | evidence list |
+| 3b | [features/chat/planner.py](features/chat/planner.py) | `gather_planned` | **Stage 1, the default.** The question is understood once (rules for greetings and plain rankings, otherwise ONE model call that returns a validated JSON plan: kind, DAO, proposal, person, search sentence). Our code then runs a FIXED set of lookups for that kind, and searches passages on every question about content, arguments or a person, scoped to what was found. Falls back to step 4 if the question cannot be understood. `CHAT_PIPELINE=agent` skips it | evidence |
+| 4 | [features/chat/agent.py](features/chat/agent.py) | `gather_evidence` | **Stage 1, the fallback (and `CHAT_PIPELINE=agent`).** Sends the question and the lookup descriptions to the LLM. The LLM replies "run `search_forum(...)`" (a request, not an answer); we run it and send the result back; repeat until it says `DONE` (max 6 rounds, max 2 forum searches). It never writes the answer. If the question asks for reasons or opinions and the model skipped the forum search, we run it ourselves (`automatic`). | evidence list |
 | 5 | [features/chat/llm.py](features/chat/llm.py) | `generate_with_tools` | One round of step 4: Groq, then Gemini, then Groq's small model (a separate daily quota) if one fails (waits ≤15 s for a rate limit; 45 s timeout) | the model's reply |
 | 6 | [features/chat/tools.py](features/chat/tools.py) | `run_tool` + 7 lookups | The lookups the LLM may request: `find_proposals`, `list_proposals`, `dao_stats`, `proposal_details`, `top_voters`, `person`, `search_forum`. Each reads SQLite / ChromaDB. A proposal the user selected is filled in when the model leaves it out. | raw results |
-| 7 | [features/chat/retrieval.py](features/chat/retrieval.py) | `retrieve` | Used by `search_forum`: embeds the query, asks ChromaDB for the nearest chunks, drops those too far away (0.7 anywhere, 0.85 inside one proposal, 1.0 for one author) | chunks |
+| 7 | [features/chat/retrieval.py](features/chat/retrieval.py) | `retrieve` | Used by `search_forum`: runs a vector search (meaning) and a BM25 keyword search ([vector/keyword_index.py](vector/keyword_index.py)) over the same chunks, merges the two rankings, drops chunks too far from the question (0.9 anywhere, 0.95 inside one proposal, 1.0 for one author) and lets a reranker ([vector/reranker.py](vector/reranker.py)) put the best first. Measure it with `python -m eval.retrieval_eval` (no LLM calls) | chunks |
 | 8 | [features/chat/context.py](features/chat/context.py) | `proposal_facts`, `author_context` | One proposal's numbers; a forum author's wallet and **how that wallet voted** (attached to every forum passage) | numbers, `chunk["sql"]` |
 | 9 | [features/metrics.py](features/metrics.py) | `top_voter_share`, `silence_ratio_pct`, … | The formulas behind the numbers (the **same** ones the endpoints use) | numbers |
 | 10 | [features/chat/prompt.py](features/chat/prompt.py) | `build_prompt` | **Stage 2.** Turns the evidence into the writer's prompt: system rules + `DATABASE FACTS` (one entry per lookup) + numbered sources + question | 2 messages |
@@ -106,6 +107,12 @@ Then, outside `sync_all`:
 | Re-check wallet links | `python -m features.identity.runner --upgrade` | new votes/posts can confirm or create links (offline, seconds) |
 | Update the search index | `python -m vector.embedding` | new posts become searchable; only new/changed text is embedded |
 
+**All of it as one unattended job:** [features/sync/refresh.py](features/sync/refresh.py) (`python -m features.sync.refresh`)
+takes a verified database backup (`backups/`, newest 5 kept), repeats `sync_all` until nothing is left to fetch,
+re-checks the wallet links, syncs the index and validates it. It writes `logs/last_refresh.json` (`ok`, `problems`,
+`warnings`, row counts before and after) and exits 1 when there are problems. Only one refresh runs at a time.
+[scripts/register_refresh_task.ps1](scripts/register_refresh_task.ps1) registers it as a daily Windows scheduled task.
+
 **The pattern every fetcher follows** (learn it once):
 ```
 1. Ask the source what EXISTS        (votes_count / thread post ids / proposal ids)
@@ -132,6 +139,7 @@ page after page. No limit, and items sharing a second are not lost.
 | What the LLM is told | [features/chat/prompt.py](features/chat/prompt.py) `SYSTEM_PROMPT` | every answer |
 | Writing a wallet link (never weakens a stronger one) | [features/identity/common.py](features/identity/common.py) `upsert_identity` | every identity strategy |
 | What the search index should contain | [vector/embedding.py](vector/embedding.py) `sync_index` | index sync |
+| What metadata every chunk carries (the schema) | [vector/chunk_metadata.py](vector/chunk_metadata.py) `ChunkMetadata` | index sync, search filters |
 | How text is split into chunks (sizes, why, where) | [vector/chunking.py](vector/chunking.py) | index sync, prompt |
 | Opening the database (and upgrading its schema) | [db/schema.py](db/schema.py) `get_connection` | everything |
 | Which DAOs we follow | [config/curated_daos.py](config/curated_daos.py) | proposal sync, `/daos` |
@@ -189,7 +197,9 @@ spaces ─< proposals ─< votes (voter wallet)
 | Start the API (docs at `/docs`) | `uvicorn main:app --reload --port 8000` |
 | **Chat with the project in the terminal** | `python -m features.chat.cli` (then `/find`, `/use`, `/lookups`, `/sources`, `/help`; it prints each lookup as the agent runs it) |
 | See what data we have / what's missing | `python -m features.sync.runner --check` |
-| Bring all data up to date | `python -m features.sync.runner --sync-all` |
+| **Bring everything up to date in one go** (backup, data, wallet links, index, check) | `python -m features.sync.refresh` (then read `logs/last_refresh.json`) |
+| Schedule that to run every day (Windows) | `powershell -ExecutionPolicy Bypass -File scripts\register_refresh_task.ps1` |
+| Bring only the data up to date | `python -m features.sync.runner --sync-all` |
 | Backfill many votes or threads | `--fetch-votes --limit 200` · `--fetch-forum --limit 200` |
 | Re-check wallet links (fast, offline) | `python -m features.identity.runner --upgrade` |
 | Run every linking strategy (network, minutes) | `python -m features.identity.runner --all` |
@@ -197,7 +207,8 @@ spaces ─< proposals ─< votes (voter wallet)
 | Check my LLM keys work | `python -m features.chat.llm` |
 | Run the tests | `python -m pytest` |
 | Refresh the generated golden questions (after a sync) | `python -m eval.build_golden` |
-| Run the golden dataset: pass/fail per question type (LLM calls) | `python -m eval.eval_harness` |
+| Run the golden dataset: pass/fail per question type (LLM calls) | `python -m eval.eval_harness` (planned pipeline, the default) |
+| …the same dataset on the older agent, to compare | `$env:CHAT_PIPELINE="agent"; python -m eval.eval_harness` (PowerShell) |
 | …only some cases | `python -m eval.eval_harness --only proposal` (a level, type, or case id) |
 | …plus faithfulness / relevancy scores (3x more LLM calls) | `python -m eval.eval_harness --judge` |
 | Re-score a saved run with updated checks (no LLM calls) | `python -m eval.eval_harness --regrade eval/results/run_<date>.json` |
@@ -239,7 +250,10 @@ provider problem, not a wrong answer: the report keeps errors out of the pass ra
 | **Silence ratio** | Forum posters ÷ voters, as %: how few voters explain themselves |
 | **Top-4 share** | Share of all voting power held by the 4 biggest wallets: whale concentration |
 | **Chunk** | A piece of text stored in ChromaDB: a block of proposal paragraphs, or a forum post (or part of a long one) |
-| **Distance** | How far a chunk's meaning is from the query; lower is closer. A descriptive sentence scores about 0.45-0.6, one keyword 0.7-0.95 |
+| **Distance** | How far a chunk's meaning is from the query; lower is closer. Correct passages lie at about 0.2-0.85, passages for a question that is not about governance at 1.0 or more |
+| **Context line** | The line put in front of a chunk before it is embedded (`Forum post by <author> on the proposal "<title>":`), so a question naming the person or the proposal can match. The stored chunk stays plain |
+| **BM25 / keyword search** | Scores chunks by the exact words they share with the question; rare words count more. Finds names, tickers and numbers that a search by meaning misses |
+| **Reranker** | A small model that reads the question and one passage together and scores how well the passage answers it; used to order the ~30 candidates the two searches found |
 | **RAG** | Retrieval-Augmented Generation: find relevant text first, then let the LLM answer from it |
 | **Tool calling** | The LLM replies with a *request* ("run `person(name=griff)`"); our code runs it and returns the result. The LLM never runs anything itself |
 | **Agent / evidence** | Stage 1: the LLM that picks the lookups, and the list of lookups with their results that it collects |

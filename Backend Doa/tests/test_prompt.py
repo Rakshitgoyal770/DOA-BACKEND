@@ -112,13 +112,24 @@ def test_a_question_with_no_evidence_still_gets_a_prompt():
 
 # ── turning evidence into facts and sources ──────────────────────────────────
 
-def test_passages_are_deduplicated_closest_first_and_capped():
+def test_passages_keep_each_searchs_ranking_take_turns_and_are_deduplicated_and_capped():
+    """The search already ranked its passages (meaning + keywords): sorting them by distance again
+    would undo that, and would let one search of a 'for and against' question take every slot."""
     first = search_entry(passage("a", 0.5), passage("b", 0.2))
     second = search_entry(passage("a", 0.5), *[passage(f"x{i}", 0.3 + i / 100) for i in range(12)])
     chunks, entries = split_evidence([first, second])
-    assert [c["id"] for c in chunks][:2] == ["b", "x0"]               # nearest first
+    # every search's 1st passage, then every 2nd (the closer one first), then every 3rd, ...
+    assert [c["id"] for c in chunks][:4] == ["a", "b", "x0", "x1"]
     assert len({c["id"] for c in chunks}) == len(chunks) == MAX_SOURCES   # no duplicates, capped
     assert entries == []
+
+
+def test_two_searches_both_keep_passages_when_one_of_them_is_closer_throughout():
+    close = search_entry(*[passage(f"for{i}", 0.2) for i in range(8)])
+    far = search_entry(*[passage(f"against{i}", 0.6) for i in range(8)])
+    chunks, _ = split_evidence([close, far])
+    kinds = [c["id"].rstrip("0123456789") for c in chunks]
+    assert kinds.count("for") == 4 and kinds.count("against") == 4
 
 
 def test_the_same_text_stored_under_two_proposals_is_one_passage():
